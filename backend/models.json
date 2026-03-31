@@ -1,0 +1,112 @@
+{
+  "models": [
+    {
+      "id": "llama-3.1-8b-instant",
+      "name": "Llama 3.1 8B (Fast)",
+      "provider": "groq",
+      "context": 8192
+    },
+    {
+      "id": "llama-3.3-70b-versatile",
+      "name": "Llama 3.3 70B (Powerful)",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "name": "Llama 4 Scout 17B 16E (Fast)",
+      "provider": "groq",
+      "context": 8192
+    },
+    {
+      "id": "meta-llama/llama-4-Preview)",
+      "name": "Llama 4 Preview",
+      "provider": "groq",
+      "context": 8192
+    },
+    {
+      "id": "llama-3.2-3b-preview",
+      "name": "Llama 3.2 3B (Preview)",
+      "provider": "groq",
+      "context": 8192
+    },
+    {
+      "id": "llama-guard-3-8b",
+      "name": "Llama Guard 3 8B (Safety)",
+      "provider": "groq",
+      "context": 8192
+    },
+    {
+      "id": "qwen-2.5-32b",
+      "name": "Qwen 2.5 32B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "qwen-2.5-coder-32b",
+      "name": "Qwen 2.5 Coder 32B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "deepseek-r1-distill-llama-70b",
+      "name": "DeepSeek R1 Distill 70B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "deepseek-r1-distill-qwen-32b",
+      "name": "DeepSeek R1 Distill Qwen 32B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "mistralai/mistral-7b-instruct:free",
+      "name": "Mistral 7B (Free)",
+      "provider": "openrouter",
+      "context": 8192
+    },
+    {
+      "id": "mistralai/mistral-nemo:free",
+      "name": "Mistral Nemo (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "meta-llama/llama-3.2-3b-instruct:free",
+      "name": "Llama 3.2 3B (Free)",
+      "provider": "openrouter",
+      "context": 4096
+    },
+    {
+      "id": "microsoft/phi-3-mini-128k-instruct:free",
+      "name": "Phi-3 Mini (Free)",
+      "provider": "openrouter",
+      "context": 128000
+    },
+    {
+      "id": "google/gemini-2.0-flash-exp:free",
+      "name": "Gemini 2.0 Flash (Free)",
+      "provider": "openrouter",
+      "context": 8192
+    },
+    {
+      "id": "qwen/qwen-2.5-7b-instruct:free",
+      "name": "Qwen 2.5 7B (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "qwen/qwen-2.5-14b-instruct:free",
+      "name": "Qwen 2.5 14B (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "deepseek/deepseek-chat:free",
+      "name": "DeepSeek Chat (Free)",
+      "provider": "openrouter",
+      "context": 65536
+    }
+  ]
+}
