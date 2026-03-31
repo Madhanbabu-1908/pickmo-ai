@@ -9,14 +9,12 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true
     },
-    icon: path.join(__dirname, '../public/icon.ico')
+    icon: path.join(__dirname, '../public/pickmo-ai.png'),
+    title: 'Pickmo.ai'
   });
 
-  // In production, load the built files
   win.loadFile(path.join(__dirname, '../dist/index.html'));
-  
-  // Open DevTools in development
-  // win.webContents.openDevTools();
+  win.setMenuBarVisibility(false);
 }
 
 app.whenReady().then(createWindow);

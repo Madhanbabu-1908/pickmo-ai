@@ -1,90 +1,112 @@
 {
-  "provider": "groq",
-  "free_tier": true,
   "models": [
     {
       "id": "llama-3.1-8b-instant",
-      "name": "Llama 3.1 8B",
-      "type": "text",
-      "context_window": 131072,
-      "category": "production"
+      "name": "Llama 3.1 8B (Fast)",
+      "provider": "groq",
+      "context": 8192
     },
     {
       "id": "llama-3.3-70b-versatile",
-      "name": "Llama 3.3 70B",
-      "type": "text",
-      "context_window": 131072,
-      "category": "production"
+      "name": "Llama 3.3 70B (Powerful)",
+      "provider": "groq",
+      "context": 32768
     },
-    {
-      "id": "openai/gpt-oss-120b",
-      "name": "GPT-OSS 120B",
-      "type": "text",
-      "context_window": 131072,
-      "category": "production"
-    },
-    {
-      "id": "openai/gpt-oss-20b",
-      "name": "GPT-OSS 20B",
-      "type": "text",
-      "context_window": 131072,
-      "category": "production"
-    },
-    {
-      "id": "whisper-large-v3",
-      "name": "Whisper Large v3",
-      "type": "audio",
-      "category": "speech-to-text"
-    },
-    {
-      "id": "whisper-large-v3-turbo",
-      "name": "Whisper Large v3 Turbo",
-      "type": "audio",
-      "category": "speech-to-text"
-    },
-
     {
       "id": "meta-llama/llama-4-scout-17b-16e-instruct",
-      "name": "Llama 4 Scout 17B",
-      "type": "text",
-      "category": "preview"
+      "name": "Llama 4 Scout 17B 16E (Fast)",
+      "provider": "groq",
+      "context": 8192
     },
     {
-      "id": "meta-llama/llama-4-maverick-17b-128e-instruct",
-      "name": "Llama 4 Maverick 17B",
-      "type": "text",
-      "category": "preview"
+      "id": "meta-llama/llama-4-Preview)",
+      "name": "Llama 4 Preview",
+      "provider": "groq",
+      "context": 8192
     },
     {
-      "id": "qwen/qwen3-32b",
-      "name": "Qwen3 32B",
-      "type": "text",
-      "category": "preview"
+      "id": "llama-3.2-3b-preview",
+      "name": "Llama 3.2 3B (Preview)",
+      "provider": "groq",
+      "context": 8192
     },
     {
-      "id": "moonshotai/kimi-k2-instruct-0905",
-      "name": "Kimi K2",
-      "type": "text",
-      "category": "preview"
+      "id": "llama-guard-3-8b",
+      "name": "Llama Guard 3 8B (Safety)",
+      "provider": "groq",
+      "context": 8192
     },
     {
-      "id": "meta-llama/llama-prompt-guard-2-22m",
-      "name": "Llama Prompt Guard 22M",
-      "type": "moderation",
-      "category": "safety"
+      "id": "qwen-2.5-32b",
+      "name": "Qwen 2.5 32B",
+      "provider": "groq",
+      "context": 32768
     },
     {
-      "id": "meta-llama/llama-prompt-guard-2-86m",
-      "name": "Llama Prompt Guard 86M",
-      "type": "moderation",
-      "category": "safety"
+      "id": "qwen-2.5-coder-32b",
+      "name": "Qwen 2.5 Coder 32B",
+      "provider": "groq",
+      "context": 32768
     },
-
     {
-      "id": "allam-2-7b-instruct",
-      "name": "Allam 2 7B",
-      "type": "text",
-      "category": "free-tier"
+      "id": "deepseek-r1-distill-llama-70b",
+      "name": "DeepSeek R1 Distill 70B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "deepseek-r1-distill-qwen-32b",
+      "name": "DeepSeek R1 Distill Qwen 32B",
+      "provider": "groq",
+      "context": 32768
+    },
+    {
+      "id": "mistralai/mistral-7b-instruct:free",
+      "name": "Mistral 7B (Free)",
+      "provider": "openrouter",
+      "context": 8192
+    },
+    {
+      "id": "mistralai/mistral-nemo:free",
+      "name": "Mistral Nemo (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "meta-llama/llama-3.2-3b-instruct:free",
+      "name": "Llama 3.2 3B (Free)",
+      "provider": "openrouter",
+      "context": 4096
+    },
+    {
+      "id": "microsoft/phi-3-mini-128k-instruct:free",
+      "name": "Phi-3 Mini (Free)",
+      "provider": "openrouter",
+      "context": 128000
+    },
+    {
+      "id": "google/gemini-2.0-flash-exp:free",
+      "name": "Gemini 2.0 Flash (Free)",
+      "provider": "openrouter",
+      "context": 8192
+    },
+    {
+      "id": "qwen/qwen-2.5-7b-instruct:free",
+      "name": "Qwen 2.5 7B (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "qwen/qwen-2.5-14b-instruct:free",
+      "name": "Qwen 2.5 14B (Free)",
+      "provider": "openrouter",
+      "context": 32768
+    },
+    {
+      "id": "deepseek/deepseek-chat:free",
+      "name": "DeepSeek Chat (Free)",
+      "provider": "openrouter",
+      "context": 65536
     }
   ]
 }
