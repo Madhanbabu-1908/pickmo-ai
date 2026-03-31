@@ -1,0 +1,90 @@
+{
+  "provider": "groq",
+  "free_tier": true,
+  "models": [
+    {
+      "id": "llama-3.1-8b-instant",
+      "name": "Llama 3.1 8B",
+      "type": "text",
+      "context_window": 131072,
+      "category": "production"
+    },
+    {
+      "id": "llama-3.3-70b-versatile",
+      "name": "Llama 3.3 70B",
+      "type": "text",
+      "context_window": 131072,
+      "category": "production"
+    },
+    {
+      "id": "openai/gpt-oss-120b",
+      "name": "GPT-OSS 120B",
+      "type": "text",
+      "context_window": 131072,
+      "category": "production"
+    },
+    {
+      "id": "openai/gpt-oss-20b",
+      "name": "GPT-OSS 20B",
+      "type": "text",
+      "context_window": 131072,
+      "category": "production"
+    },
+    {
+      "id": "whisper-large-v3",
+      "name": "Whisper Large v3",
+      "type": "audio",
+      "category": "speech-to-text"
+    },
+    {
+      "id": "whisper-large-v3-turbo",
+      "name": "Whisper Large v3 Turbo",
+      "type": "audio",
+      "category": "speech-to-text"
+    },
+
+    {
+      "id": "meta-llama/llama-4-scout-17b-16e-instruct",
+      "name": "Llama 4 Scout 17B",
+      "type": "text",
+      "category": "preview"
+    },
+    {
+      "id": "meta-llama/llama-4-maverick-17b-128e-instruct",
+      "name": "Llama 4 Maverick 17B",
+      "type": "text",
+      "category": "preview"
+    },
+    {
+      "id": "qwen/qwen3-32b",
+      "name": "Qwen3 32B",
+      "type": "text",
+      "category": "preview"
+    },
+    {
+      "id": "moonshotai/kimi-k2-instruct-0905",
+      "name": "Kimi K2",
+      "type": "text",
+      "category": "preview"
+    },
+    {
+      "id": "meta-llama/llama-prompt-guard-2-22m",
+      "name": "Llama Prompt Guard 22M",
+      "type": "moderation",
+      "category": "safety"
+    },
+    {
+      "id": "meta-llama/llama-prompt-guard-2-86m",
+      "name": "Llama Prompt Guard 86M",
+      "type": "moderation",
+      "category": "safety"
+    },
+
+    {
+      "id": "allam-2-7b-instruct",
+      "name": "Allam 2 7B",
+      "type": "text",
+      "category": "free-tier"
+    }
+  ]
+}
