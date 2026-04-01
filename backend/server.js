@@ -8,10 +8,35 @@ const cosineSimilarity = require('cosine-similarity');
 const { pipeline } = require('@xenova/transformers');
 
 const app = express();
+
+// ========== CORS CONFIGURATION ==========
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+  'https://pickmo-ai-frontend.vercel.app',
+  'https://pickmo-ai.vercel.app',
+  'https://*.vercel.app'
+];
+
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl)
+    if (!origin) return callback(null, true);
+    
+    // Check if origin is allowed
+    if (allowedOrigins.some(allowed => origin === allowed || origin.endsWith('.vercel.app'))) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked for origin:', origin);
+      // For production, you may want to block. For now, allow all for testing
+      callback(null, true);
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
 app.use(express.json({ limit: '10mb' }));
 
 // Initialize Groq client
@@ -82,7 +107,7 @@ async function fetchGroqModels() {
         provider: 'groq',
         context: model.context_window || 8192,
         available: true,
-        free: true // Groq models are free
+        free: true
       }));
   } catch (err) {
     console.error('Failed to fetch Groq models:', err.message);
@@ -151,7 +176,7 @@ async function fetchOpenRouterModels() {
       context: model.context_length || 8192,
       available: true,
       free: true,
-      pricing: model.pricing // Keep for debugging
+      pricing: model.pricing
     }));
   } catch (err) {
     console.error('Failed to fetch OpenRouter models:', err.message);
@@ -239,6 +264,20 @@ async function getModels() {
 }
 
 // ========== ROUTES ==========
+
+// Health check
+app.get('/api/health', async (req, res) => {
+  const models = await getModels();
+  res.json({ 
+    status: 'ok', 
+    message: 'Backend is running!',
+    timestamp: new Date().toISOString(),
+    embedding_mode: EMBEDDING_MODE,
+    total_models: models.length,
+    documents: documents.length,
+    last_refresh: lastFetchTime
+  });
+});
 
 // Get available free text models
 app.get('/api/models', async (req, res) => {
@@ -466,20 +505,8 @@ app.post('/api/feedback', async (req, res) => {
   }
 });
 
-// Health check
-app.get('/api/health', async (req, res) => {
-  const models = await getModels();
-  res.json({ 
-    status: 'ok', 
-    embedding_mode: EMBEDDING_MODE,
-    total_models: models.length,
-    documents: documents.length,
-    last_refresh: lastFetchTime
-  });
-});
-
-// Start server
-const PORT = process.env.PORT || 5000;
+// ========== START SERVER ==========
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
