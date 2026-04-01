@@ -10,15 +10,12 @@ const { pipeline } = require('@xenova/transformers');
 const app = express();
 
 // ========== CORS CONFIGURATION - ALLOW ALL ORIGINS ==========  
-// This is the most permissive setting to ensure Vercel can access
 app.use(cors({
-  origin: '*',  // Allow all origins (Vercel, localhost, etc.)
+  origin: '*',
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
-// Handle preflight OPTIONS requests
 app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
@@ -68,20 +65,35 @@ async function getEmbedding(text) {
 // In-memory document store
 let documents = [];
 
-// ========== DYNAMIC MODEL FETCHING ==========  
-// Cache for models (refresh every hour)
+// ========== GUARDRAILS: PII DETECTION ==========
+function containsPII(text) {
+  const patterns = [
+    // Email addresses
+    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/,
+    // Indian phone numbers (10 digits starting with 6-9, optional +91 or 0)
+    /\b(\+?91|0)?[6-9]\d{9}\b/,
+    // International phone numbers (simplified)
+    /\b(\+\d{1,3}[- ]?)?\(?\d{2,4}\)?[- ]?\d{3,4}[- ]?\d{4}\b/,
+    // Credit/debit card numbers (13-16 digits)
+    /\b(?:\d[ -]*?){13,16}\b/,
+    // Aadhaar (12 digits with optional spaces/dashes)
+    /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/,
+    // PAN (5 letters + 4 digits + 1 letter)
+    /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/
+  ];
+  return patterns.some(pattern => pattern.test(text));
+}
+
+// ========== DYNAMIC MODEL FETCHING ==========
 let cachedModels = [];
 let lastFetchTime = null;
 const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
 
-// Fetch models from Groq
 async function fetchGroqModels() {
   if (!groq) return [];
-  
   try {
     const response = await groq.models.list();
     const models = response.data || [];
-    
     return models
       .filter(model => model.active === true || model.active === undefined)
       .map(model => ({
@@ -98,7 +110,6 @@ async function fetchGroqModels() {
   }
 }
 
-// Check if a model is free based on pricing
 function isModelFree(model) {
   if (model.id.includes(':free')) return true;
   if (model.pricing && model.pricing.prompt === 0) return true;
@@ -106,10 +117,8 @@ function isModelFree(model) {
   return false;
 }
 
-// Fetch FREE models from OpenRouter only
 async function fetchOpenRouterModels() {
   if (!process.env.OPENROUTER_API_KEY) return [];
-  
   try {
     const response = await axios.get('https://openrouter.ai/api/v1/models', {
       headers: {
@@ -118,17 +127,13 @@ async function fetchOpenRouterModels() {
         'X-Title': 'Pickmo.ai'
       }
     });
-    
     const models = response.data.data || [];
-    
     const freeModels = models.filter(model => {
       const isTextModel = !model.modality || model.modality === 'text';
       const isFree = isModelFree(model);
       return isTextModel && isFree;
     });
-    
     console.log(`   Found ${freeModels.length} free models out of ${models.length} total`);
-    
     return freeModels.map(model => ({
       id: model.id,
       name: formatModelName(model.id),
@@ -143,7 +148,6 @@ async function fetchOpenRouterModels() {
   }
 }
 
-// Format model name for display
 function formatModelName(modelId) {
   let name = modelId
     .replace(':free', '')
@@ -152,51 +156,40 @@ function formatModelName(modelId) {
     .replace('-versatile', '')
     .replace('-instant', '')
     .replace('-chat', '');
-  
   const parts = name.split('/');
   name = parts[parts.length - 1];
   name = name.replace(/[_-]/g, ' ');
   name = name.split(' ').map(word => 
     word.charAt(0).toUpperCase() + word.slice(1)
   ).join(' ');
-  
   if (modelId.includes('groq') || modelId.startsWith('llama') || modelId.startsWith('mixtral') || modelId.startsWith('qwen') || modelId.startsWith('deepseek')) {
     name = name + ' (Groq)';
   } else if (modelId.includes('openrouter') || modelId.includes(':')) {
     name = name + ' (Free)';
   }
-  
   return name;
 }
 
-// Refresh models cache
 async function refreshModels() {
   console.log('🔄 Fetching available FREE models from providers...');
-  
   const [groqModels, openRouterModels] = await Promise.all([
     fetchGroqModels(),
     fetchOpenRouterModels()
   ]);
-  
   const allModels = [...groqModels, ...openRouterModels];
   const uniqueModels = Array.from(new Map(allModels.map(model => [model.id, model])).values());
-  
   uniqueModels.sort((a, b) => {
     if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
     return a.name.localeCompare(b.name);
   });
-  
   cachedModels = uniqueModels;
   lastFetchTime = Date.now();
-  
   console.log(`📊 FREE Models fetched: ${cachedModels.length} total`);
   console.log(`   - Groq: ${groqModels.length} free models`);
   console.log(`   - OpenRouter: ${openRouterModels.length} free models`);
-  
   return cachedModels;
 }
 
-// Get cached models (refresh if needed)
 async function getModels() {
   if (!lastFetchTime || Date.now() - lastFetchTime > CACHE_DURATION || cachedModels.length === 0) {
     await refreshModels();
@@ -204,8 +197,7 @@ async function getModels() {
   return cachedModels;
 }
 
-// ========== ROUTES ==========  
-// Health check
+// ========== ROUTES ==========
 app.get('/api/health', async (req, res) => {
   const models = await getModels();
   res.json({ 
@@ -219,7 +211,6 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// Get available free text models
 app.get('/api/models', async (req, res) => {
   try {
     const models = await getModels();
@@ -230,21 +221,17 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-// Get model details
 app.get('/api/models/:modelId', async (req, res) => {
   try {
     const models = await getModels();
     const model = models.find(m => m.id === req.params.modelId);
-    if (!model) {
-      return res.status(404).json({ error: 'Model not found' });
-    }
+    if (!model) return res.status(404).json({ error: 'Model not found' });
     res.json(model);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch model' });
   }
 });
 
-// Force refresh models (admin endpoint)
 app.post('/api/models/refresh', async (req, res) => {
   try {
     await refreshModels();
@@ -255,7 +242,7 @@ app.post('/api/models/refresh', async (req, res) => {
   }
 });
 
-// Streaming chat endpoint
+// Streaming chat endpoint with PII guardrail
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages } = req.body;
   
@@ -269,15 +256,14 @@ app.post('/api/chat/stream', async (req, res) => {
   
   const availableModels = await getModels();
   const model = availableModels.find(m => m.id === modelId);
-  
   if (!model) {
     return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
   }
-  
   if (!model.free) {
     return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
   }
   
+  // Clean messages and filter out any with no content
   const cleanMessages = messages
     .filter(msg => msg && typeof msg.content === 'string' && msg.content.length > 0)
     .map(msg => ({ role: msg.role, content: msg.content }));
@@ -294,6 +280,16 @@ app.post('/api/chat/stream', async (req, res) => {
     return;
   }
   
+  // GUARDRAIL: Check each message for PII
+  for (const msg of cleanMessages) {
+    if (containsPII(msg.content)) {
+      console.warn(`⚠️ Blocked request due to PII in message: ${msg.content.substring(0, 50)}...`);
+      res.write('⚠️ Your message contains personal information (e.g., email, phone number, credit card). For your privacy, we cannot process this request. Please remove sensitive data and try again.');
+      res.end();
+      return;
+    }
+  }
+  
   console.log(`💬 Chat request - Model: ${model.name} (${model.provider})`);
   
   res.setHeader('Content-Type', 'text/plain');
@@ -302,22 +298,18 @@ app.post('/api/chat/stream', async (req, res) => {
   try {
     if (model.provider === 'groq') {
       if (!groq) throw new Error('Groq not configured');
-      
       const stream = await groq.chat.completions.create({
         model: model.id,
         messages: cleanMessages,
         stream: true,
         max_tokens: 1024,
       });
-      
       for await (const chunk of stream) {
         const content = chunk.choices[0]?.delta?.content || '';
         if (content) res.write(content);
       }
-      
     } else if (model.provider === 'openrouter') {
       if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
-      
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
         { 
@@ -336,7 +328,6 @@ app.post('/api/chat/stream', async (req, res) => {
           timeout: 60000
         }
       );
-      
       response.data.on('data', (chunk) => {
         const lines = chunk.toString().split('\n');
         for (const line of lines) {
@@ -349,15 +340,11 @@ app.post('/api/chat/stream', async (req, res) => {
           }
         }
       });
-      
       await new Promise((resolve) => response.data.on('end', resolve));
     }
-    
     res.end();
-    
   } catch (err) {
     console.error('Chat error:', err.message);
-    
     if (err.response?.status === 401) {
       res.write('❌ Invalid API key. Please check your API keys.');
     } else if (err.response?.status === 429) {
@@ -371,11 +358,10 @@ app.post('/api/chat/stream', async (req, res) => {
   }
 });
 
-// RAG: Upload document
+// RAG endpoints (unchanged)
 app.post('/api/rag/upload', async (req, res) => {
   const { text, name } = req.body;
   if (!text) return res.status(400).json({ error: 'No text' });
-  
   try {
     const embedding = await getEmbedding(text);
     documents.push({ 
@@ -392,11 +378,9 @@ app.post('/api/rag/upload', async (req, res) => {
   }
 });
 
-// RAG: Search
 app.post('/api/rag/search', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.json([]);
-  
   try {
     const queryEmbed = await getEmbedding(query);
     const scored = documents.map(doc => ({
@@ -413,11 +397,10 @@ app.post('/api/rag/search', async (req, res) => {
   }
 });
 
-// Feedback
+// Feedback (unchanged)
 app.post('/api/feedback', async (req, res) => {
   const { type, message } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
-  
   try {
     await transporter.sendMail({
       from: process.env.SMTP_USER,
@@ -432,15 +415,13 @@ app.post('/api/feedback', async (req, res) => {
   }
 });
 
-// ========== START SERVER ==========
+// Start server
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
-  
   const models = await getModels();
   console.log(`🤖 FREE Models loaded: ${models.length} text models`);
-  
   console.log(`🔑 Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`📧 Email: ${process.env.SMTP_USER ? '✅ Configured' : '❌ Not configured'}`);
