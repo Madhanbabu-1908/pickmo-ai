@@ -9,33 +9,17 @@ const { pipeline } = require('@xenova/transformers');
 
 const app = express();
 
-// ========== CORS CONFIGURATION ==========
-const allowedOrigins = [
-  'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://pickmo-ai-frontend.vercel.app',
-  'https://pickmo-ai.vercel.app',
-  'https://*.vercel.app'
-];
-
+// ========== CORS CONFIGURATION - ALLOW ALL ORIGINS ==========
+// This is the most permissive setting to ensure Vercel can access
 app.use(cors({
-  origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl)
-    if (!origin) return callback(null, true);
-    
-    // Check if origin is allowed
-    if (allowedOrigins.some(allowed => origin === allowed || origin.endsWith('.vercel.app'))) {
-      callback(null, true);
-    } else {
-      console.log('CORS blocked for origin:', origin);
-      // For production, you may want to block. For now, allow all for testing
-      callback(null, true);
-    }
-  },
+  origin: '*',  // Allow all origins (Vercel, localhost, etc.)
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
+
+// Handle preflight OPTIONS requests
+app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 
@@ -117,27 +101,9 @@ async function fetchGroqModels() {
 
 // Check if a model is free based on pricing
 function isModelFree(model) {
-  // Check by ID suffix
-  if (model.id.includes(':free')) {
-    return true;
-  }
-  
-  // Check pricing - if prompt cost is 0, it's free
-  if (model.pricing) {
-    const promptCost = model.pricing.prompt;
-    if (promptCost === 0 || promptCost === '0' || promptCost === 0.0) {
-      return true;
-    }
-  }
-  
-  // Check description for free indicators
-  if (model.description && (
-    model.description.toLowerCase().includes('free') ||
-    model.description.toLowerCase().includes('no cost')
-  )) {
-    return true;
-  }
-  
+  if (model.id.includes(':free')) return true;
+  if (model.pricing && model.pricing.prompt === 0) return true;
+  if (model.description && model.description.toLowerCase().includes('free')) return true;
   return false;
 }
 
@@ -156,14 +122,9 @@ async function fetchOpenRouterModels() {
     
     const models = response.data.data || [];
     
-    // Filter ONLY FREE models
     const freeModels = models.filter(model => {
-      // Must be a text model (not image/audio)
       const isTextModel = !model.modality || model.modality === 'text';
-      
-      // Check if it's free
       const isFree = isModelFree(model);
-      
       return isTextModel && isFree;
     });
     
@@ -175,8 +136,7 @@ async function fetchOpenRouterModels() {
       provider: 'openrouter',
       context: model.context_length || 8192,
       available: true,
-      free: true,
-      pricing: model.pricing
+      free: true
     }));
   } catch (err) {
     console.error('Failed to fetch OpenRouter models:', err.message);
@@ -186,7 +146,6 @@ async function fetchOpenRouterModels() {
 
 // Format model name for display
 function formatModelName(modelId) {
-  // Remove provider prefixes and :free suffix
   let name = modelId
     .replace(':free', '')
     .replace('-instruct', '')
@@ -195,19 +154,13 @@ function formatModelName(modelId) {
     .replace('-instant', '')
     .replace('-chat', '');
   
-  // Split by slashes and take last part
   const parts = name.split('/');
   name = parts[parts.length - 1];
-  
-  // Replace hyphens and underscores with spaces
   name = name.replace(/[_-]/g, ' ');
-  
-  // Capitalize each word
   name = name.split(' ').map(word => 
     word.charAt(0).toUpperCase() + word.slice(1)
   ).join(' ');
   
-  // Add provider suffix for clarity
   if (modelId.includes('groq') || modelId.startsWith('llama') || modelId.startsWith('mixtral') || modelId.startsWith('qwen') || modelId.startsWith('deepseek')) {
     name = name + ' (Groq)';
   } else if (modelId.includes('openrouter') || modelId.includes(':')) {
@@ -226,17 +179,11 @@ async function refreshModels() {
     fetchOpenRouterModels()
   ]);
   
-  // Combine and deduplicate
   const allModels = [...groqModels, ...openRouterModels];
-  const uniqueModels = Array.from(
-    new Map(allModels.map(model => [model.id, model])).values()
-  );
+  const uniqueModels = Array.from(new Map(allModels.map(model => [model.id, model])).values());
   
-  // Sort by provider then name
   uniqueModels.sort((a, b) => {
-    if (a.provider !== b.provider) {
-      return a.provider.localeCompare(b.provider);
-    }
+    if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
     return a.name.localeCompare(b.name);
   });
   
@@ -246,11 +193,6 @@ async function refreshModels() {
   console.log(`📊 FREE Models fetched: ${cachedModels.length} total`);
   console.log(`   - Groq: ${groqModels.length} free models`);
   console.log(`   - OpenRouter: ${openRouterModels.length} free models`);
-  
-  // Log some example models
-  if (openRouterModels.length > 0) {
-    console.log(`   - Example free models: ${openRouterModels.slice(0, 3).map(m => m.id).join(', ')}`);
-  }
   
   return cachedModels;
 }
@@ -327,7 +269,6 @@ app.post('/api/chat/stream', async (req, res) => {
     return res.status(400).json({ error: 'Messages array required' });
   }
   
-  // Get fresh models to verify model exists
   const availableModels = await getModels();
   const model = availableModels.find(m => m.id === modelId);
   
@@ -335,18 +276,13 @@ app.post('/api/chat/stream', async (req, res) => {
     return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
   }
   
-  // Verify it's a free model (extra safety)
   if (!model.free) {
     return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
   }
   
-  // Clean messages - remove 'id' property
   const cleanMessages = messages
     .filter(msg => msg && typeof msg.content === 'string' && msg.content.length > 0)
-    .map(msg => ({
-      role: msg.role,
-      content: msg.content
-    }));
+    .map(msg => ({ role: msg.role, content: msg.content }));
   
   if (cleanMessages.length === 0) {
     res.write('Please start a new conversation.');
@@ -367,9 +303,7 @@ app.post('/api/chat/stream', async (req, res) => {
   
   try {
     if (model.provider === 'groq') {
-      if (!groq) {
-        throw new Error('Groq not configured');
-      }
+      if (!groq) throw new Error('Groq not configured');
       
       const stream = await groq.chat.completions.create({
         model: model.id,
@@ -384,9 +318,7 @@ app.post('/api/chat/stream', async (req, res) => {
       }
       
     } else if (model.provider === 'openrouter') {
-      if (!process.env.OPENROUTER_API_KEY) {
-        throw new Error('OpenRouter not configured');
-      }
+      if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
       
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
@@ -420,10 +352,7 @@ app.post('/api/chat/stream', async (req, res) => {
         }
       });
       
-      await new Promise((resolve) => {
-        response.data.on('end', resolve);
-        response.data.on('error', resolve);
-      });
+      await new Promise((resolve) => response.data.on('end', resolve));
     }
     
     res.end();
@@ -511,7 +440,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
   
-  // Initial model fetch
   const models = await getModels();
   console.log(`🤖 FREE Models loaded: ${models.length} text models`);
   
