@@ -1,41 +1,79 @@
-// Import required libraries
+// server.js
+
 const express = require('express');
-const cors = require('cors');
-const { OpenRouter } = require('openrouter');
-const { Groq } = require('groq');
-
-// Initialize Express app
 const app = express();
-const port = process.env.PORT || 3000;
+const bodyParser = require('body-parser');
+const nodemailer = require('nodemailer');
+const { OpenRouter } = require('openrouter');
+const cache = require('some-cache-library'); // assume this as a placeholder for a caching library
 
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Set up Streaming Chat
-app.post('/chat', async (req, res) => {
-    const { userMessage } = req.body;
-    // Process the user message with RAG and OpenRouter models
-    const response = await OpenRouter.streamResponse(userMessage);
-    res.status(200).send(response);
+// Groq integration
+const groq = require('@groq/client');
+const groqClient = groq.createClient({
+    projectId: 'yourProjectId',
+    dataset: 'yourDataset',
 });
 
-// Handle email feedback
-app.post('/feedback', (req, res) => {
-    const { email, feedback } = req.body;
-    // Process feedback (e.g., save to database)
-    console.log(`Feedback received from ${email}: ${feedback}`);
-    res.status(200).send('Feedback received successfully');
+// Setup body-parser middleware
+app.use(bodyParser.json());
+
+// Define OpenRouter instance
+const openRouter = new OpenRouter();
+
+// RAG functionality
+app.post('/ask', async (req, res) => {
+    const { question } = req.body;
+    // Check cache first
+    const cachedResponse = cache.get(question);
+    if (cachedResponse) {
+        return res.json({ answer: cachedResponse });
+    }
+
+    try {
+        // Logic to get answer from RAG system
+        const answer = await someRagFunction(question);
+        // Cache the answer
+        cache.set(question, answer);
+        res.json({ answer });
+    } catch (error) {
+        console.error('Error:', error);
+        res.status(500).json({ error: 'Internal Server Error' });
+    }
 });
 
-// Social Media Integration
-app.get('/groq-model', async (req, res) => {
-    // Fetch data using Groq
-    const data = await Groq.fetchData();
-    res.status(200).json(data);
+// Streaming chat functionality
+app.get('/chat', (req, res) => {
+    // Logic for streaming chat responses
 });
 
-// Start server
-app.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}`);
+// Email feedback system
+app.post('/feedback', async (req, res) => {
+    const { feedback } = req.body;
+    const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: 'yourEmail@gmail.com',
+            pass: 'yourEmailPassword',
+        },
+    });
+
+    const mailOptions = {
+        from: 'yourEmail@gmail.com',
+        to: 'admin@example.com',
+        subject: 'User Feedback',
+        text: feedback,
+    };
+
+    try {
+        await transporter.sendMail(mailOptions);
+        res.json({ message: 'Feedback sent successfully!' });
+    } catch (error) {
+        console.error('Error sending feedback:', error);
+        res.status(500).json({ error: 'Failed to send feedback' });
+    }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
 });
