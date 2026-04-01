@@ -9,7 +9,7 @@ const { pipeline } = require('@xenova/transformers');
 
 const app = express();
 
-// ========== CORS CONFIGURATION - ALLOW ALL ORIGINS ==========  
+// ========== CORS ==========
 app.use(cors({
   origin: '*',
   credentials: true,
@@ -20,7 +20,7 @@ app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 
-// Initialize Groq client
+// ========== Groq client ==========
 let groq;
 try {
   groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -29,18 +29,15 @@ try {
   console.warn('⚠️ Groq API key not configured');
 }
 
-// Email transporter
+// ========== Email ==========
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || 'smtp.gmail.com',
   port: parseInt(process.env.SMTP_PORT) || 587,
   secure: process.env.SMTP_PORT === '465',
-  auth: { 
-    user: process.env.SMTP_USER, 
-    pass: process.env.SMTP_PASS 
-  }
+  auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
 });
 
-// Embeddings Setup
+// ========== Embeddings ==========
 let embedder = null;
 const EMBEDDING_MODE = process.env.EMBEDDING_MODE || 'simple';
 
@@ -62,29 +59,32 @@ async function getEmbedding(text) {
   }
 }
 
-// In-memory document store
 let documents = [];
 
-// ========== GUARDRAILS: PII DETECTION ==========
+// ========== PII Guardrail ==========
 function containsPII(text) {
   const patterns = [
-    // Email addresses
     /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/,
-    // Indian phone numbers (10 digits starting with 6-9, optional +91 or 0)
     /\b(\+?91|0)?[6-9]\d{9}\b/,
-    // International phone numbers (simplified)
     /\b(\+\d{1,3}[- ]?)?\(?\d{2,4}\)?[- ]?\d{3,4}[- ]?\d{4}\b/,
-    // Credit/debit card numbers (13-16 digits)
     /\b(?:\d[ -]*?){13,16}\b/,
-    // Aadhaar (12 digits with optional spaces/dashes)
     /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/,
-    // PAN (5 letters + 4 digits + 1 letter)
     /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/
   ];
   return patterns.some(pattern => pattern.test(text));
 }
 
-// ========== DYNAMIC MODEL FETCHING ==========
+// ========== Multimodal helper ==========
+function toPlainText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const textPart = content.find(p => p.type === 'text');
+    return textPart?.text || '';
+  }
+  return '';
+}
+
+// ========== Dynamic model fetching ==========
 let cachedModels = [];
 let lastFetchTime = null;
 const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
@@ -140,7 +140,9 @@ async function fetchOpenRouterModels() {
       provider: 'openrouter',
       context: model.context_length || 8192,
       available: true,
-      free: true
+      free: true,
+      // Mark vision models
+      type: (model.id.includes('gemini') || model.id.includes('nemotron-nano-12b-vl') || model.id.includes('step-1.5v')) ? 'vision' : undefined
     }));
   } catch (err) {
     console.error('Failed to fetch OpenRouter models:', err.message);
@@ -159,9 +161,7 @@ function formatModelName(modelId) {
   const parts = name.split('/');
   name = parts[parts.length - 1];
   name = name.replace(/[_-]/g, ' ');
-  name = name.split(' ').map(word => 
-    word.charAt(0).toUpperCase() + word.slice(1)
-  ).join(' ');
+  name = name.split(' ').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
   if (modelId.includes('groq') || modelId.startsWith('llama') || modelId.startsWith('mixtral') || modelId.startsWith('qwen') || modelId.startsWith('deepseek')) {
     name = name + ' (Groq)';
   } else if (modelId.includes('openrouter') || modelId.includes(':')) {
@@ -197,18 +197,10 @@ async function getModels() {
   return cachedModels;
 }
 
-// ========== ROUTES ==========
+// ========== Routes ==========
 app.get('/api/health', async (req, res) => {
   const models = await getModels();
-  res.json({ 
-    status: 'ok', 
-    message: 'Backend is running!',
-    timestamp: new Date().toISOString(),
-    embedding_mode: EMBEDDING_MODE,
-    total_models: models.length,
-    documents: documents.length,
-    last_refresh: lastFetchTime
-  });
+  res.json({ status: 'ok', message: 'Backend is running!', timestamp: new Date().toISOString(), embedding_mode: EMBEDDING_MODE, total_models: models.length, documents: documents.length, last_refresh: lastFetchTime });
 });
 
 app.get('/api/models', async (req, res) => {
@@ -242,65 +234,69 @@ app.post('/api/models/refresh', async (req, res) => {
   }
 });
 
-// Streaming chat endpoint with PII guardrail
+// ========== Streaming chat (multimodal) ==========
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages } = req.body;
-  
-  if (!modelId) {
-    return res.status(400).json({ error: 'Model ID required' });
-  }
-  
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'Messages array required' });
-  }
-  
+
+  if (!modelId) return res.status(400).json({ error: 'Model ID required' });
+  if (!messages || !Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'Messages array required' });
+
   const availableModels = await getModels();
   const model = availableModels.find(m => m.id === modelId);
-  if (!model) {
-    return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
-  }
-  if (!model.free) {
-    return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
-  }
-  
-  // Clean messages and filter out any with no content
+  if (!model) return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
+  if (!model.free) return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
+
+  // Clean messages: keep only valid entries (string or array content)
   const cleanMessages = messages
-    .filter(msg => msg && typeof msg.content === 'string' && msg.content.length > 0)
+    .filter(msg => msg && (typeof msg.content === 'string' || Array.isArray(msg.content)) && msg.content.length > 0)
     .map(msg => ({ role: msg.role, content: msg.content }));
-  
+
   if (cleanMessages.length === 0) {
     res.write('Please start a new conversation.');
     res.end();
     return;
   }
-  
-  if (cleanMessages[cleanMessages.length - 1].role !== 'user') {
+
+  // Last message must be from user
+  const last = cleanMessages[cleanMessages.length - 1];
+  if (last.role !== 'user') {
     res.write('I\'m waiting for your message.');
     res.end();
     return;
   }
-  
-  // GUARDRAIL: Check each message for PII
+
+  // PII guardrail (only check text parts)
   for (const msg of cleanMessages) {
-    if (containsPII(msg.content)) {
-      console.warn(`⚠️ Blocked request due to PII in message: ${msg.content.substring(0, 50)}...`);
-      res.write('⚠️ Your message contains personal information (e.g., email, phone number, credit card). For your privacy, we cannot process this request. Please remove sensitive data and try again.');
+    let text = '';
+    if (typeof msg.content === 'string') text = msg.content;
+    else if (Array.isArray(msg.content)) {
+      const textPart = msg.content.find(p => p.type === 'text');
+      if (textPart) text = textPart.text;
+    }
+    if (containsPII(text)) {
+      console.warn(`⚠️ Blocked request due to PII: ${text.substring(0, 50)}...`);
+      res.write('⚠️ Your message contains personal information. For privacy, we cannot process this request.');
       res.end();
       return;
     }
   }
-  
+
   console.log(`💬 Chat request - Model: ${model.name} (${model.provider})`);
-  
+
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Transfer-Encoding', 'chunked');
-  
+
   try {
     if (model.provider === 'groq') {
       if (!groq) throw new Error('Groq not configured');
+      // Groq does not support images → convert all messages to plain text
+      const textOnlyMessages = cleanMessages.map(msg => ({
+        role: msg.role,
+        content: toPlainText(msg.content)
+      }));
       const stream = await groq.chat.completions.create({
         model: model.id,
-        messages: cleanMessages,
+        messages: textOnlyMessages,
         stream: true,
         max_tokens: 1024,
       });
@@ -310,20 +306,21 @@ app.post('/api/chat/stream', async (req, res) => {
       }
     } else if (model.provider === 'openrouter') {
       if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
+      // OpenRouter accepts multimodal messages (array format) directly
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
-        { 
-          model: model.id, 
-          messages: cleanMessages, 
+        {
+          model: model.id,
+          messages: cleanMessages,   // preserve arrays
           stream: true,
-          max_tokens: 1024
+          max_tokens: 1024,
         },
-        { 
-          headers: { 
+        {
+          headers: {
             Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
             'HTTP-Referer': 'https://pickmo.ai',
             'X-Title': 'Pickmo.ai'
-          }, 
+          },
           responseType: 'stream',
           timeout: 60000
         }
@@ -345,31 +342,21 @@ app.post('/api/chat/stream', async (req, res) => {
     res.end();
   } catch (err) {
     console.error('Chat error:', err.message);
-    if (err.response?.status === 401) {
-      res.write('❌ Invalid API key. Please check your API keys.');
-    } else if (err.response?.status === 429) {
-      res.write('⏰ Rate limit exceeded. Please try again in a moment.');
-    } else if (err.response?.data?.error?.message) {
-      res.write(`❌ ${err.response.data.error.message}`);
-    } else {
-      res.write('❌ Sorry, I encountered an error. Please try again.');
-    }
+    if (err.response?.status === 401) res.write('❌ Invalid API key.');
+    else if (err.response?.status === 429) res.write('⏰ Rate limit exceeded. Please try again.');
+    else if (err.response?.data?.error?.message) res.write(`❌ ${err.response.data.error.message}`);
+    else res.write('❌ Sorry, I encountered an error. Please try again.');
     res.end();
   }
 });
 
-// RAG endpoints (unchanged)
+// ========== RAG endpoints ==========
 app.post('/api/rag/upload', async (req, res) => {
   const { text, name } = req.body;
   if (!text) return res.status(400).json({ error: 'No text' });
   try {
     const embedding = await getEmbedding(text);
-    documents.push({ 
-      id: Date.now(), 
-      text: text.substring(0, 2000),
-      name, 
-      embedding 
-    });
+    documents.push({ id: Date.now(), text: text.substring(0, 2000), name, embedding });
     console.log(`📄 Document indexed: ${name}`);
     res.json({ success: true, count: documents.length });
   } catch (err) {
@@ -397,7 +384,7 @@ app.post('/api/rag/search', async (req, res) => {
   }
 });
 
-// Feedback (unchanged)
+// ========== Feedback ==========
 app.post('/api/feedback', async (req, res) => {
   const { type, message } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
@@ -415,7 +402,7 @@ app.post('/api/feedback', async (req, res) => {
   }
 });
 
-// Start server
+// ========== Start server ==========
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
