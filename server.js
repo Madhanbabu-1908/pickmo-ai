@@ -8,6 +8,7 @@ const cosineSimilarity = require('cosine-similarity');
 const { pipeline } = require('@xenova/transformers');
 const fs = require('fs');
 const path = require('path');
+const { GoogleGenAI } = require("@google/genai");
 
 const app = express();
 
@@ -29,6 +30,17 @@ try {
   console.log('✅ Groq client initialized');
 } catch (err) {
   console.warn('⚠️ Groq API key not configured');
+}
+
+// ========== Google Gemini client ==========
+let googleAi;
+try {
+  if (process.env.GOOGLE_API_KEY) {
+    googleAi = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+    console.log('✅ Google Gemini client initialized');
+  }
+} catch (err) {
+  console.warn('⚠️ Google Gemini API key not configured');
 }
 
 // ========== Email ==========
@@ -62,7 +74,7 @@ async function getEmbedding(text) {
 }
 
 // ========== Per‑chat document store ==========
-const documentsByChat = new Map(); // key: chatId, value: array of {id, text, name, embedding}
+const documentsByChat = new Map();
 const BACKUP_FILE = path.join(__dirname, 'documents_backup.json');
 
 function saveDocumentsToDisk() {
@@ -112,6 +124,15 @@ function toPlainText(content) {
   return '';
 }
 
+// Extract base64 image from multimodal content (for Google)
+function extractImages(content) {
+  if (!Array.isArray(content)) return [];
+  return content.filter(part => part.type === 'image_url').map(part => ({
+    mimeType: 'image/jpeg', // default, could be improved by checking data URI
+    data: part.image_url.url.split(',')[1] // remove data:image/...;base64,
+  }));
+}
+
 // ========== Dynamic model fetching ==========
 let cachedModels = [];
 let lastFetchTime = null;
@@ -157,9 +178,9 @@ async function fetchOpenRouterModels() {
     });
     const models = response.data.data || [];
     const freeModels = models.filter(model => {
-      const isTextModel = !model.modality || model.modality === 'text';
+      const isTextOrMultimodal = !model.modality || model.modality === 'text' || model.modality === 'multimodal';
       const isFree = isModelFree(model);
-      return isTextModel && isFree;
+      return isTextOrMultimodal && isFree;
     });
     console.log(`   Found ${freeModels.length} free models out of ${models.length} total`);
     return freeModels.map(model => ({
@@ -175,6 +196,23 @@ async function fetchOpenRouterModels() {
     console.error('Failed to fetch OpenRouter models:', err.message);
     return [];
   }
+}
+
+async function fetchGoogleModels() {
+  if (!googleAi) return [];
+  // List of free Gemini models (text and multimodal)
+  const freeModels = [
+    {
+      id: "gemini-2.0-flash",
+      name: "Gemini 2.0 Flash (Fast & Free)",
+      provider: "google",
+      context: 1048576,
+      free: true,
+      type: "vision"
+    },
+    // You can add more free models here (e.g., "gemini-1.5-flash")
+  ];
+  return freeModels;
 }
 
 function formatModelName(modelId) {
@@ -193,17 +231,20 @@ function formatModelName(modelId) {
     name = name + ' (Groq)';
   } else if (modelId.includes('openrouter') || modelId.includes(':')) {
     name = name + ' (Free)';
+  } else if (modelId.startsWith('gemini')) {
+    name = name + ' (Google)';
   }
   return name;
 }
 
 async function refreshModels() {
   console.log('🔄 Fetching available FREE models from providers...');
-  const [groqModels, openRouterModels] = await Promise.all([
+  const [groqModels, openRouterModels, googleModels] = await Promise.all([
     fetchGroqModels(),
-    fetchOpenRouterModels()
+    fetchOpenRouterModels(),
+    fetchGoogleModels()
   ]);
-  const allModels = [...groqModels, ...openRouterModels];
+  const allModels = [...groqModels, ...openRouterModels, ...googleModels];
   const uniqueModels = Array.from(new Map(allModels.map(model => [model.id, model])).values());
   uniqueModels.sort((a, b) => {
     if (a.provider !== b.provider) return a.provider.localeCompare(b.provider);
@@ -214,6 +255,7 @@ async function refreshModels() {
   console.log(`📊 FREE Models fetched: ${cachedModels.length} total`);
   console.log(`   - Groq: ${groqModels.length} free models`);
   console.log(`   - OpenRouter: ${openRouterModels.length} free models`);
+  console.log(`   - Google: ${googleModels.length} free models`);
   return cachedModels;
 }
 
@@ -343,7 +385,7 @@ app.delete('/api/rag/delete/:chatId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ========== CHAT STREAMING ENDPOINT (MISSING – ADDED HERE) ==========
+// ========== CHAT STREAMING ENDPOINT ==========
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages } = req.body;
 
@@ -364,7 +406,7 @@ app.post('/api/chat/stream', async (req, res) => {
     return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
   }
 
-  // Clean messages and support multimodal (array) content
+  // Clean messages – keep both string and array content
   const cleanMessages = messages
     .filter(msg => msg && (typeof msg.content === 'string' || Array.isArray(msg.content)) && msg.content.length > 0)
     .map(msg => ({ role: msg.role, content: msg.content }));
@@ -406,7 +448,6 @@ app.post('/api/chat/stream', async (req, res) => {
   try {
     if (model.provider === 'groq') {
       if (!groq) throw new Error('Groq not configured');
-      // Groq does not support images → convert all messages to plain text
       const textOnlyMessages = cleanMessages.map(msg => ({
         role: msg.role,
         content: toPlainText(msg.content)
@@ -421,9 +462,9 @@ app.post('/api/chat/stream', async (req, res) => {
         const content = chunk.choices[0]?.delta?.content || '';
         if (content) res.write(content);
       }
-    } else if (model.provider === 'openrouter') {
+    } 
+    else if (model.provider === 'openrouter') {
       if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
-      // OpenRouter accepts multimodal messages directly
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
         {
@@ -456,18 +497,85 @@ app.post('/api/chat/stream', async (req, res) => {
       });
       await new Promise((resolve) => response.data.on('end', resolve));
     }
+    else if (model.provider === 'google') {
+      if (!googleAi) throw new Error('Google Gemini not configured');
+      
+      // Build conversation history for Google
+      const history = [];
+      for (let i = 0; i < cleanMessages.length - 1; i++) {
+        const msg = cleanMessages[i];
+        let parts = [];
+        if (typeof msg.content === 'string') {
+          parts = [{ text: msg.content }];
+        } else if (Array.isArray(msg.content)) {
+          // Extract text and images
+          const textPart = msg.content.find(p => p.type === 'text');
+          if (textPart) parts.push({ text: textPart.text });
+          const imageParts = extractImages(msg.content);
+          for (const img of imageParts) {
+            parts.push({
+              inlineData: {
+                mimeType: img.mimeType,
+                data: img.data
+              }
+            });
+          }
+        }
+        history.push({
+          role: msg.role === 'assistant' ? 'model' : 'user',
+          parts
+        });
+      }
+      
+      // Current user message (the last one)
+      const lastMsg = cleanMessages[cleanMessages.length - 1];
+      let currentParts = [];
+      if (typeof lastMsg.content === 'string') {
+        currentParts = [{ text: lastMsg.content }];
+      } else if (Array.isArray(lastMsg.content)) {
+        const textPart = lastMsg.content.find(p => p.type === 'text');
+        if (textPart) currentParts.push({ text: textPart.text });
+        const imageParts = extractImages(lastMsg.content);
+        for (const img of imageParts) {
+          currentParts.push({
+            inlineData: {
+              mimeType: img.mimeType,
+              data: img.data
+            }
+          });
+        }
+      }
+      
+      const chat = googleAi.chats.create({
+        model: model.id,
+        history: history,
+        config: {
+          temperature: 0.7,
+          maxOutputTokens: 1024,
+        }
+      });
+      
+      const response = await chat.sendMessageStream({
+        message: currentParts
+      });
+      
+      for await (const chunk of response) {
+        const text = chunk.text;
+        if (text) res.write(text);
+      }
+    }
+    else {
+      throw new Error(`Unsupported provider: ${model.provider}`);
+    }
     res.end();
   } catch (err) {
     console.error('Chat error:', err.message);
-    if (err.response?.status === 401) {
-      res.write('❌ Invalid API key. Please check your API keys.');
-    } else if (err.response?.status === 429) {
-      res.write('⏰ Rate limit exceeded. Please try again in a moment.');
-    } else if (err.response?.data?.error?.message) {
-      res.write(`❌ ${err.response.data.error.message}`);
-    } else {
-      res.write('❌ Sorry, I encountered an error. Please try again.');
-    }
+    let errorMsg = '❌ Sorry, I encountered an error. Please try again.';
+    if (err.response?.status === 401) errorMsg = '❌ Invalid API key. Please check your API keys.';
+    else if (err.response?.status === 429) errorMsg = '⏰ Rate limit exceeded. Please try again in a moment.';
+    else if (err.response?.data?.error?.message) errorMsg = `❌ ${err.response.data.error.message}`;
+    else if (err.message.includes('vision')) errorMsg = '❌ This model does not support images. Please select a vision model (e.g., Gemini 2.0 Flash).';
+    res.write(errorMsg);
     res.end();
   }
 });
@@ -485,7 +593,7 @@ app.post('/api/feedback', async (req, res) => {
     });
     res.json({ success: true });
   } catch (err) {
-    console.error('Email error:', err);
+  console.error('Email error:', err);
     res.status(500).json({ error: 'Email failed' });
   }
 });
@@ -500,6 +608,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🤖 FREE Models loaded: ${models.length} text models`);
   console.log(`🔑 Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
+  console.log(`🔑 Google: ${process.env.GOOGLE_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`📧 Email: ${process.env.SMTP_USER ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔄 Models will refresh every hour automatically\n`);
 });
