@@ -15,7 +15,7 @@
     "groq-sdk": "^0.3.0",
     "axios": "^1.4.0",
     "@xenova/transformers": "^2.6.0",
-    "cosine-similarity": "^1.0.1"
+    "cosine-similarity": "^1.0.1",
     "@google/genai": "^0.7.0"
   },
   "devDependencies": {
