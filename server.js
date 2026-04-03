@@ -112,7 +112,7 @@ function toPlainText(content) {
   return '';
 }
 
-// ========== Dynamic model fetching (unchanged) ==========
+// ========== Dynamic model fetching ==========
 let cachedModels = [];
 let lastFetchTime = null;
 const CACHE_DURATION = 60 * 60 * 1000;
@@ -312,6 +312,26 @@ app.post('/api/rag/search', async (req, res) => {
   }
 });
 
+app.get('/api/rag/documents/:chatId', (req, res) => {
+  const { chatId } = req.params;
+  const docs = documentsByChat.get(chatId) || [];
+  const safeDocs = docs.map(doc => ({ id: doc.id, name: doc.name, text: doc.text.substring(0, 100) }));
+  res.json(safeDocs);
+});
+
+app.delete('/api/rag/document/:chatId/:docId', (req, res) => {
+  const { chatId, docId } = req.params;
+  const docs = documentsByChat.get(chatId);
+  if (docs) {
+    const filtered = docs.filter(d => d.id !== parseInt(docId));
+    documentsByChat.set(chatId, filtered);
+    if (process.env.SAVE_DOCUMENTS === 'true') saveDocumentsToDisk();
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: 'Chat not found' });
+  }
+});
+
 app.delete('/api/rag/delete/:chatId', async (req, res) => {
   const { chatId } = req.params;
   if (!chatId) return res.status(400).json({ error: 'chatId required' });
@@ -323,9 +343,134 @@ app.delete('/api/rag/delete/:chatId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ========== Streaming chat (unchanged except for RAG integration) ==========
-// (Keep your existing /api/chat/stream – it does not need to know about chatId because RAG is handled on frontend)
-// The frontend will call /api/rag/search separately and inject the context.
+// ========== CHAT STREAMING ENDPOINT (MISSING – ADDED HERE) ==========
+app.post('/api/chat/stream', async (req, res) => {
+  const { modelId, messages } = req.body;
+
+  if (!modelId) {
+    return res.status(400).json({ error: 'Model ID required' });
+  }
+
+  if (!messages || !Array.isArray(messages) || messages.length === 0) {
+    return res.status(400).json({ error: 'Messages array required' });
+  }
+
+  const availableModels = await getModels();
+  const model = availableModels.find(m => m.id === modelId);
+  if (!model) {
+    return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
+  }
+  if (!model.free) {
+    return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
+  }
+
+  // Clean messages and support multimodal (array) content
+  const cleanMessages = messages
+    .filter(msg => msg && (typeof msg.content === 'string' || Array.isArray(msg.content)) && msg.content.length > 0)
+    .map(msg => ({ role: msg.role, content: msg.content }));
+
+  if (cleanMessages.length === 0) {
+    res.write('Please start a new conversation.');
+    res.end();
+    return;
+  }
+
+  // Ensure last message is from user
+  if (cleanMessages[cleanMessages.length - 1].role !== 'user') {
+    res.write('I\'m waiting for your message.');
+    res.end();
+    return;
+  }
+
+  // PII guardrail – only check text parts
+  for (const msg of cleanMessages) {
+    let text = '';
+    if (typeof msg.content === 'string') text = msg.content;
+    else if (Array.isArray(msg.content)) {
+      const textPart = msg.content.find(p => p.type === 'text');
+      if (textPart) text = textPart.text;
+    }
+    if (containsPII(text)) {
+      console.warn(`⚠️ Blocked request due to PII: ${text.substring(0, 50)}...`);
+      res.write('⚠️ Your message contains personal information. For privacy, we cannot process this request.');
+      res.end();
+      return;
+    }
+  }
+
+  console.log(`💬 Chat request - Model: ${model.name} (${model.provider})`);
+
+  res.setHeader('Content-Type', 'text/plain');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  try {
+    if (model.provider === 'groq') {
+      if (!groq) throw new Error('Groq not configured');
+      // Groq does not support images → convert all messages to plain text
+      const textOnlyMessages = cleanMessages.map(msg => ({
+        role: msg.role,
+        content: toPlainText(msg.content)
+      }));
+      const stream = await groq.chat.completions.create({
+        model: model.id,
+        messages: textOnlyMessages,
+        stream: true,
+        max_tokens: 1024,
+      });
+      for await (const chunk of stream) {
+        const content = chunk.choices[0]?.delta?.content || '';
+        if (content) res.write(content);
+      }
+    } else if (model.provider === 'openrouter') {
+      if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
+      // OpenRouter accepts multimodal messages directly
+      const response = await axios.post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {
+          model: model.id,
+          messages: cleanMessages,
+          stream: true,
+          max_tokens: 1024,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
+            'HTTP-Referer': 'https://pickmo.ai',
+            'X-Title': 'Pickmo.ai'
+          },
+          responseType: 'stream',
+          timeout: 60000
+        }
+      );
+      response.data.on('data', (chunk) => {
+        const lines = chunk.toString().split('\n');
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const json = JSON.parse(line.slice(6));
+              const content = json.choices[0]?.delta?.content || '';
+              if (content) res.write(content);
+            } catch (e) { /* ignore */ }
+          }
+        }
+      });
+      await new Promise((resolve) => response.data.on('end', resolve));
+    }
+    res.end();
+  } catch (err) {
+    console.error('Chat error:', err.message);
+    if (err.response?.status === 401) {
+      res.write('❌ Invalid API key. Please check your API keys.');
+    } else if (err.response?.status === 429) {
+      res.write('⏰ Rate limit exceeded. Please try again in a moment.');
+    } else if (err.response?.data?.error?.message) {
+      res.write(`❌ ${err.response.data.error.message}`);
+    } else {
+      res.write('❌ Sorry, I encountered an error. Please try again.');
+    }
+    res.end();
+  }
+});
 
 // ========== Feedback ==========
 app.post('/api/feedback', async (req, res) => {
@@ -350,7 +495,7 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
-  loadDocumentsFromDisk(); // restore previous documents
+  loadDocumentsFromDisk();
   const models = await getModels();
   console.log(`🤖 FREE Models loaded: ${models.length} text models`);
   console.log(`🔑 Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
