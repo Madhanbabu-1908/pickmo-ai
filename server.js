@@ -23,7 +23,7 @@ app.options('*', cors());
 
 app.use(express.json({ limit: '10mb' }));
 
-// ========== Groq client ==========
+// ========== Clients ==========
 let groq;
 try {
   groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
@@ -32,7 +32,6 @@ try {
   console.warn('⚠️ Groq API key not configured');
 }
 
-// ========== Google Gemini client ==========
 let googleAi;
 try {
   if (process.env.GOOGLE_API_KEY) {
@@ -114,7 +113,7 @@ function containsPII(text) {
   return patterns.some(pattern => pattern.test(text));
 }
 
-// ========== Multimodal helper ==========
+// ========== Multimodal helpers ==========
 function toPlainText(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
@@ -124,20 +123,20 @@ function toPlainText(content) {
   return '';
 }
 
-// Extract base64 image from multimodal content (for Google)
 function extractImages(content) {
   if (!Array.isArray(content)) return [];
   return content.filter(part => part.type === 'image_url').map(part => ({
-    mimeType: 'image/jpeg', // default, could be improved by checking data URI
-    data: part.image_url.url.split(',')[1] // remove data:image/...;base64,
+    mimeType: 'image/jpeg',
+    data: part.image_url.url.split(',')[1]
   }));
 }
 
 // ========== Dynamic model fetching ==========
 let cachedModels = [];
 let lastFetchTime = null;
-const CACHE_DURATION = 60 * 60 * 1000;
+const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
 
+// ----- Groq -----
 async function fetchGroqModels() {
   if (!groq) return [];
   try {
@@ -150,7 +149,6 @@ async function fetchGroqModels() {
         name: formatModelName(model.id),
         provider: 'groq',
         context: model.context_window || 8192,
-        available: true,
         free: true
       }));
   } catch (err) {
@@ -159,6 +157,7 @@ async function fetchGroqModels() {
   }
 }
 
+// ----- OpenRouter (free only) -----
 function isModelFree(model) {
   if (model.id.includes(':free')) return true;
   if (model.pricing && model.pricing.prompt === 0) return true;
@@ -179,18 +178,16 @@ async function fetchOpenRouterModels() {
     const models = response.data.data || [];
     const freeModels = models.filter(model => {
       const isTextOrMultimodal = !model.modality || model.modality === 'text' || model.modality === 'multimodal';
-      const isFree = isModelFree(model);
-      return isTextOrMultimodal && isFree;
+      return isTextOrMultimodal && isModelFree(model);
     });
-    console.log(`   Found ${freeModels.length} free models out of ${models.length} total`);
+    console.log(`   Found ${freeModels.length} free OpenRouter models out of ${models.length} total`);
     return freeModels.map(model => ({
       id: model.id,
       name: formatModelName(model.id),
       provider: 'openrouter',
       context: model.context_length || 8192,
-      available: true,
       free: true,
-      type: (model.id.includes('gemini') || model.id.includes('nemotron-nano-12b-vl') || model.id.includes('step-1.5v')) ? 'vision' : undefined
+      type: (model.id.includes('gemini') || model.id.includes('nemotron-nano-12b-vl')) ? 'vision' : undefined
     }));
   } catch (err) {
     console.error('Failed to fetch OpenRouter models:', err.message);
@@ -198,23 +195,37 @@ async function fetchOpenRouterModels() {
   }
 }
 
+// ----- Google (fully dynamic) -----
 async function fetchGoogleModels() {
-  if (!googleAi) return [];
-  // List of free Gemini models (text and multimodal)
-  const freeModels = [
-    {
-      id: "gemini-2.0-flash",
-      name: "Gemini 2.0 Flash (Fast & Free)",
-      provider: "google",
-      context: 1048576,
+  if (!process.env.GOOGLE_API_KEY) return [];
+  try {
+    const response = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`
+    );
+    const allModels = response.data.models || [];
+    // Heuristic: free Gemini chat models (no paid/turbo/premium)
+    const pattern = process.env.GOOGLE_FREE_MODEL_PATTERN || '^gemini-(?!.*(paid|turbo|premium)).*';
+    const regex = new RegExp(pattern, 'i');
+    const freeModels = allModels.filter(model => {
+      const isChat = model.supportedGenerationMethods?.includes('generateContent');
+      return isChat && regex.test(model.name);
+    });
+    console.log(`   Found ${freeModels.length} free Google models out of ${allModels.length} total`);
+    return freeModels.map(model => ({
+      id: model.name,
+      name: formatModelName(model.name),
+      provider: 'google',
+      context: model.inputTokenLimit || 1048576,
       free: true,
-      type: "vision"
-    },
-    // You can add more free models here (e.g., "gemini-1.5-flash")
-  ];
-  return freeModels;
+      type: model.name.toLowerCase().includes('flash') ? 'vision' : undefined
+    }));
+  } catch (err) {
+    console.error('Failed to fetch Google models:', err.message);
+    return [];
+  }
 }
 
+// ----- Format model name for UI -----
 function formatModelName(modelId) {
   let name = modelId
     .replace(':free', '')
@@ -237,6 +248,7 @@ function formatModelName(modelId) {
   return name;
 }
 
+// ----- Refresh all models -----
 async function refreshModels() {
   console.log('🔄 Fetching available FREE models from providers...');
   const [groqModels, openRouterModels, googleModels] = await Promise.all([
@@ -253,9 +265,9 @@ async function refreshModels() {
   cachedModels = uniqueModels;
   lastFetchTime = Date.now();
   console.log(`📊 FREE Models fetched: ${cachedModels.length} total`);
-  console.log(`   - Groq: ${groqModels.length} free models`);
-  console.log(`   - OpenRouter: ${openRouterModels.length} free models`);
-  console.log(`   - Google: ${googleModels.length} free models`);
+  console.log(`   - Groq: ${groqModels.length}`);
+  console.log(`   - OpenRouter: ${openRouterModels.length}`);
+  console.log(`   - Google: ${googleModels.length}`);
   return cachedModels;
 }
 
@@ -282,21 +294,10 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
-app.get('/api/models/:modelId', async (req, res) => {
-  try {
-    const models = await getModels();
-    const model = models.find(m => m.id === req.params.modelId);
-    if (!model) return res.status(404).json({ error: 'Model not found' });
-    res.json(model);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to fetch model' });
-  }
-});
-
 app.post('/api/models/refresh', async (req, res) => {
   try {
     await refreshModels();
-    res.json({ success: true, count: cachedModels.length, models: cachedModels });
+    res.json({ success: true, count: cachedModels.length });
   } catch (err) {
     console.error('Error refreshing models:', err);
     res.status(500).json({ error: 'Failed to refresh models' });
@@ -308,18 +309,10 @@ app.post('/api/rag/upload', async (req, res) => {
   const { text, name, chatId } = req.body;
   if (!text) return res.status(400).json({ error: 'No text' });
   if (!chatId) return res.status(400).json({ error: 'chatId required' });
-
   try {
     const embedding = await getEmbedding(text);
-    const doc = {
-      id: Date.now(),
-      text: text.substring(0, 2000),
-      name: name || 'Unnamed document',
-      embedding
-    };
-    if (!documentsByChat.has(chatId)) {
-      documentsByChat.set(chatId, []);
-    }
+    const doc = { id: Date.now(), text: text.substring(0, 2000), name: name || 'Unnamed document', embedding };
+    if (!documentsByChat.has(chatId)) documentsByChat.set(chatId, []);
     documentsByChat.get(chatId).push(doc);
     if (process.env.SAVE_DOCUMENTS === 'true') saveDocumentsToDisk();
     console.log(`📄 Document indexed for chat ${chatId}: ${name}`);
@@ -334,18 +327,11 @@ app.post('/api/rag/search', async (req, res) => {
   const { query, chatId } = req.body;
   if (!query) return res.json([]);
   if (!chatId) return res.status(400).json({ error: 'chatId required' });
-
   const docs = documentsByChat.get(chatId) || [];
   if (docs.length === 0) return res.json([]);
-
   try {
     const queryEmbed = await getEmbedding(query);
-    const scored = docs.map(doc => ({
-      id: doc.id,
-      text: doc.text,
-      name: doc.name,
-      score: cosineSimilarity(queryEmbed, doc.embedding)
-    }));
+    const scored = docs.map(doc => ({ id: doc.id, text: doc.text, name: doc.name, score: cosineSimilarity(queryEmbed, doc.embedding) }));
     scored.sort((a, b) => b.score - a.score);
     res.json(scored.slice(0, 3));
   } catch (err) {
@@ -385,28 +371,19 @@ app.delete('/api/rag/delete/:chatId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ========== CHAT STREAMING ENDPOINT ==========
+// ========== STREAMING CHAT ==========
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages } = req.body;
 
-  if (!modelId) {
-    return res.status(400).json({ error: 'Model ID required' });
-  }
-
-  if (!messages || !Array.isArray(messages) || messages.length === 0) {
-    return res.status(400).json({ error: 'Messages array required' });
-  }
+  if (!modelId) return res.status(400).json({ error: 'Model ID required' });
+  if (!messages || !Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'Messages array required' });
 
   const availableModels = await getModels();
   const model = availableModels.find(m => m.id === modelId);
-  if (!model) {
-    return res.status(400).json({ error: 'Invalid or decommissioned model: ' + modelId });
-  }
-  if (!model.free) {
-    return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
-  }
+  if (!model) return res.status(400).json({ error: 'Invalid model: ' + modelId });
+  if (!model.free) return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
 
-  // Clean messages – keep both string and array content
+  // Clean messages (allow string or array content)
   const cleanMessages = messages
     .filter(msg => msg && (typeof msg.content === 'string' || Array.isArray(msg.content)) && msg.content.length > 0)
     .map(msg => ({ role: msg.role, content: msg.content }));
@@ -416,15 +393,13 @@ app.post('/api/chat/stream', async (req, res) => {
     res.end();
     return;
   }
-
-  // Ensure last message is from user
   if (cleanMessages[cleanMessages.length - 1].role !== 'user') {
     res.write('I\'m waiting for your message.');
     res.end();
     return;
   }
 
-  // PII guardrail – only check text parts
+  // PII guardrail
   for (const msg of cleanMessages) {
     let text = '';
     if (typeof msg.content === 'string') text = msg.content;
@@ -441,20 +416,17 @@ app.post('/api/chat/stream', async (req, res) => {
   }
 
   console.log(`💬 Chat request - Model: ${model.name} (${model.provider})`);
-
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Transfer-Encoding', 'chunked');
 
   try {
+    // ----- Groq -----
     if (model.provider === 'groq') {
       if (!groq) throw new Error('Groq not configured');
-      const textOnlyMessages = cleanMessages.map(msg => ({
-        role: msg.role,
-        content: toPlainText(msg.content)
-      }));
+      const textOnly = cleanMessages.map(msg => ({ role: msg.role, content: toPlainText(msg.content) }));
       const stream = await groq.chat.completions.create({
         model: model.id,
-        messages: textOnlyMessages,
+        messages: textOnly,
         stream: true,
         max_tokens: 1024,
       });
@@ -462,17 +434,13 @@ app.post('/api/chat/stream', async (req, res) => {
         const content = chunk.choices[0]?.delta?.content || '';
         if (content) res.write(content);
       }
-    } 
+    }
+    // ----- OpenRouter -----
     else if (model.provider === 'openrouter') {
       if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
       const response = await axios.post(
         'https://openrouter.ai/api/v1/chat/completions',
-        {
-          model: model.id,
-          messages: cleanMessages,
-          stream: true,
-          max_tokens: 1024,
-        },
+        { model: model.id, messages: cleanMessages, stream: true, max_tokens: 1024 },
         {
           headers: {
             Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
@@ -491,77 +459,76 @@ app.post('/api/chat/stream', async (req, res) => {
               const json = JSON.parse(line.slice(6));
               const content = json.choices[0]?.delta?.content || '';
               if (content) res.write(content);
-            } catch (e) { /* ignore */ }
+            } catch (e) {}
           }
         }
       });
       await new Promise((resolve) => response.data.on('end', resolve));
     }
+    // ----- Google (with retry on 429) -----
     else if (model.provider === 'google') {
       if (!googleAi) throw new Error('Google Gemini not configured');
-      
-      // Build conversation history for Google
-      const history = [];
-      for (let i = 0; i < cleanMessages.length - 1; i++) {
-        const msg = cleanMessages[i];
-        let parts = [];
-        if (typeof msg.content === 'string') {
-          parts = [{ text: msg.content }];
-        } else if (Array.isArray(msg.content)) {
-          // Extract text and images
-          const textPart = msg.content.find(p => p.type === 'text');
-          if (textPart) parts.push({ text: textPart.text });
-          const imageParts = extractImages(msg.content);
-          for (const img of imageParts) {
-            parts.push({
-              inlineData: {
-                mimeType: img.mimeType,
-                data: img.data
+
+      const maxRetries = 3;
+      let attempt = 0;
+      let success = false;
+
+      while (attempt < maxRetries && !success) {
+        try {
+          // Build conversation history (excluding last message)
+          const history = [];
+          for (let i = 0; i < cleanMessages.length - 1; i++) {
+            const msg = cleanMessages[i];
+            let parts = [];
+            if (typeof msg.content === 'string') {
+              parts = [{ text: msg.content }];
+            } else if (Array.isArray(msg.content)) {
+              const textPart = msg.content.find(p => p.type === 'text');
+              if (textPart) parts.push({ text: textPart.text });
+              for (const img of extractImages(msg.content)) {
+                parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
               }
+            }
+            history.push({
+              role: msg.role === 'assistant' ? 'model' : 'user',
+              parts
             });
           }
-        }
-        history.push({
-          role: msg.role === 'assistant' ? 'model' : 'user',
-          parts
-        });
-      }
-      
-      // Current user message (the last one)
-      const lastMsg = cleanMessages[cleanMessages.length - 1];
-      let currentParts = [];
-      if (typeof lastMsg.content === 'string') {
-        currentParts = [{ text: lastMsg.content }];
-      } else if (Array.isArray(lastMsg.content)) {
-        const textPart = lastMsg.content.find(p => p.type === 'text');
-        if (textPart) currentParts.push({ text: textPart.text });
-        const imageParts = extractImages(lastMsg.content);
-        for (const img of imageParts) {
-          currentParts.push({
-            inlineData: {
-              mimeType: img.mimeType,
-              data: img.data
+
+          // Current user message
+          const lastMsg = cleanMessages[cleanMessages.length - 1];
+          let currentParts = [];
+          if (typeof lastMsg.content === 'string') {
+            currentParts = [{ text: lastMsg.content }];
+          } else if (Array.isArray(lastMsg.content)) {
+            const textPart = lastMsg.content.find(p => p.type === 'text');
+            if (textPart) currentParts.push({ text: textPart.text });
+            for (const img of extractImages(lastMsg.content)) {
+              currentParts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
             }
+          }
+
+          const chat = googleAi.chats.create({
+            model: model.id,
+            history: history,
+            config: { temperature: 0.7, maxOutputTokens: 1024 }
           });
+
+          const response = await chat.sendMessageStream({ message: currentParts });
+          for await (const chunk of response) {
+            if (chunk.text) res.write(chunk.text);
+          }
+          success = true;
+        } catch (err) {
+          if (err.status === 429 && attempt < maxRetries - 1) {
+            const delay = Math.pow(2, attempt) * 1000;
+            console.log(`⚠️ Google rate limit (429). Retrying in ${delay}ms...`);
+            await new Promise(r => setTimeout(r, delay));
+            attempt++;
+          } else {
+            throw err;
+          }
         }
-      }
-      
-      const chat = googleAi.chats.create({
-        model: model.id,
-        history: history,
-        config: {
-          temperature: 0.7,
-          maxOutputTokens: 1024,
-        }
-      });
-      
-      const response = await chat.sendMessageStream({
-        message: currentParts
-      });
-      
-      for await (const chunk of response) {
-        const text = chunk.text;
-        if (text) res.write(text);
       }
     }
     else {
@@ -593,7 +560,7 @@ app.post('/api/feedback', async (req, res) => {
     });
     res.json({ success: true });
   } catch (err) {
-  console.error('Email error:', err);
+    console.error('Email error:', err);
     res.status(500).json({ error: 'Email failed' });
   }
 });
@@ -605,7 +572,7 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
   loadDocumentsFromDisk();
   const models = await getModels();
-  console.log(`🤖 FREE Models loaded: ${models.length} text models`);
+  console.log(`🤖 FREE Models loaded: ${models.length} total`);
   console.log(`🔑 Groq: ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 Google: ${process.env.GOOGLE_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
