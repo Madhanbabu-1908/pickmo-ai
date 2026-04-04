@@ -80,12 +80,7 @@ function saveDocumentsToDisk() {
   if (process.env.SAVE_DOCUMENTS !== 'true') return;
   const data = {};
   for (const [chatId, docs] of documentsByChat.entries()) {
-    data[chatId] = docs.map(doc => ({
-      id: doc.id,
-      text: doc.text,
-      name: doc.name,
-      embedding: doc.embedding
-    }));
+    data[chatId] = docs.map(doc => ({ id: doc.id, text: doc.text, name: doc.name, embedding: doc.embedding }));
   }
   fs.writeFileSync(BACKUP_FILE, JSON.stringify(data, null, 2));
   console.log(`💾 Saved ${documentsByChat.size} chats to disk`);
@@ -131,12 +126,33 @@ function extractImages(content) {
   }));
 }
 
+// ========== Web Search (DuckDuckGo HTML) ==========
+async function webSearch(query) {
+  try {
+    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+    const response = await axios.get(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36' }
+    });
+    const html = response.data;
+    const results = [];
+    // Simple regex to extract titles and URLs (not perfect but works for basic needs)
+    const linkRegex = /<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)<\/a>/g;
+    let match;
+    while ((match = linkRegex.exec(html)) !== null && results.length < 3) {
+      results.push({ title: match[2], url: match[1] });
+    }
+    return results;
+  } catch (err) {
+    console.error('Web search error:', err.message);
+    return [];
+  }
+}
+
 // ========== Dynamic model fetching ==========
 let cachedModels = [];
 let lastFetchTime = null;
 const CACHE_DURATION = 60 * 60 * 1000; // 1 hour
 
-// ----- Groq -----
 async function fetchGroqModels() {
   if (!groq) return [];
   try {
@@ -157,7 +173,6 @@ async function fetchGroqModels() {
   }
 }
 
-// ----- OpenRouter (free only) -----
 function isModelFree(model) {
   if (model.id.includes(':free')) return true;
   if (model.pricing && model.pricing.prompt === 0) return true;
@@ -195,15 +210,11 @@ async function fetchOpenRouterModels() {
   }
 }
 
-// ----- Google (fully dynamic) -----
 async function fetchGoogleModels() {
   if (!process.env.GOOGLE_API_KEY) return [];
   try {
-    const response = await axios.get(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`
-    );
+    const response = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`);
     const allModels = response.data.models || [];
-    // Heuristic: free Gemini chat models (no paid/turbo/premium)
     const pattern = process.env.GOOGLE_FREE_MODEL_PATTERN || '^gemini-(?!.*(paid|turbo|premium)).*';
     const regex = new RegExp(pattern, 'i');
     const freeModels = allModels.filter(model => {
@@ -225,7 +236,6 @@ async function fetchGoogleModels() {
   }
 }
 
-// ----- Format model name for UI -----
 function formatModelName(modelId) {
   let name = modelId
     .replace(':free', '')
@@ -248,7 +258,6 @@ function formatModelName(modelId) {
   return name;
 }
 
-// ----- Refresh all models -----
 async function refreshModels() {
   console.log('🔄 Fetching available FREE models from providers...');
   const [groqModels, openRouterModels, googleModels] = await Promise.all([
@@ -301,6 +310,29 @@ app.post('/api/models/refresh', async (req, res) => {
   } catch (err) {
     console.error('Error refreshing models:', err);
     res.status(500).json({ error: 'Failed to refresh models' });
+  }
+});
+
+// ========== Auto‑title generation ==========
+app.post('/api/chat/title', async (req, res) => {
+  const { message, modelId } = req.body;
+  if (!message) return res.status(400).json({ error: 'Message required' });
+  try {
+    const groqClient = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const completion = await groqClient.chat.completions.create({
+      model: modelId || 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: 'Generate a very short title (3-5 words) for this user message. Return ONLY the title, no extra text, no quotes.' },
+        { role: 'user', content: message }
+      ],
+      temperature: 0.5,
+      max_tokens: 20
+    });
+    const title = completion.choices[0].message.content.trim();
+    res.json({ title: title.substring(0, 40) });
+  } catch (err) {
+    console.error('Title generation error:', err);
+    res.status(500).json({ error: 'Failed to generate title' });
   }
 });
 
@@ -371,9 +403,9 @@ app.delete('/api/rag/delete/:chatId', async (req, res) => {
   res.json({ success: true });
 });
 
-// ========== STREAMING CHAT ==========
+// ========== CHAT STREAMING ENDPOINT (with web search) ==========
 app.post('/api/chat/stream', async (req, res) => {
-  const { modelId, messages } = req.body;
+  const { modelId, messages, enableSearch = false } = req.body;
 
   if (!modelId) return res.status(400).json({ error: 'Model ID required' });
   if (!messages || !Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: 'Messages array required' });
@@ -384,7 +416,7 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!model.free) return res.status(403).json({ error: 'This model requires payment. Please select a free model.' });
 
   // Clean messages (allow string or array content)
-  const cleanMessages = messages
+  let cleanMessages = messages
     .filter(msg => msg && (typeof msg.content === 'string' || Array.isArray(msg.content)) && msg.content.length > 0)
     .map(msg => ({ role: msg.role, content: msg.content }));
 
@@ -399,7 +431,19 @@ app.post('/api/chat/stream', async (req, res) => {
     return;
   }
 
-  // PII guardrail
+  // Web search integration
+  if (enableSearch) {
+    const lastUserMsg = cleanMessages.filter(m => m.role === 'user').pop();
+    if (lastUserMsg && typeof lastUserMsg.content === 'string') {
+      const searchResults = await webSearch(lastUserMsg.content);
+      if (searchResults.length) {
+        const searchContext = `Web search results for "${lastUserMsg.content}":\n${searchResults.map(r => `- ${r.title}: ${r.url}`).join('\n')}`;
+        cleanMessages.unshift({ role: 'system', content: searchContext });
+      }
+    }
+  }
+
+  // PII guardrail (only check text parts)
   for (const msg of cleanMessages) {
     let text = '';
     if (typeof msg.content === 'string') text = msg.content;
@@ -415,7 +459,7 @@ app.post('/api/chat/stream', async (req, res) => {
     }
   }
 
-  console.log(`💬 Chat request - Model: ${model.name} (${model.provider})`);
+  console.log(`💬 Chat request - Model: ${model.name} (${model.provider})${enableSearch ? ' [Web search enabled]' : ''}`);
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Transfer-Encoding', 'chunked');
 
@@ -496,7 +540,7 @@ app.post('/api/chat/stream', async (req, res) => {
           }
 
           // Current user message
-          const lastMsg = cleanMessages[cleanMessages.length - 1];
+     const lastMsg = cleanMessages[cleanMessages.length - 1];
           let currentParts = [];
           if (typeof lastMsg.content === 'string') {
             currentParts = [{ text: lastMsg.content }];
