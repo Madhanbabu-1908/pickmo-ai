@@ -286,21 +286,26 @@ function buildWebSearchPrompt(pages, allImages, query) {
     `IMAGE_${i + 1}: src="${img.src}" alt="${img.alt}" from_source=[${img.sourceIndex}]`
   ).join('\n');
 
-  return `You are a helpful AI assistant with access to live web search results.
+  return `You are a professional AI assistant with access to live web search results.
 
-Answer the user's query using ONLY the sources below. Be detailed and helpful.
+FORMATTING RULES (CRITICAL):
+- Use clean markdown formatting.
+- For TABLES: Use HTML <table> tags with borders, NOT markdown pipes.
+  Example:
+  <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%;">
+    <thead><tr><th>Column 1</th><th>Column 2</th></tr></thead>
+    <tbody><tr><td>Data 1</td><td>Data 2</td></tr></tbody>
+  </table>
+- For LISTS: Use - or * for bullet points.
+- For HEADINGS: Use ## for section headings.
+- For BOLD: Use **text**.
+- Use proper spacing between sections.
 
 CITATION RULES (mandatory):
-- Add inline citation numbers like [1], [2] after facts from sources
+- Add inline citation numbers like [1], [2] after every fact.
 - End your response with a "📚 Sources:" section:
   [1] Site Name – URL
   [2] Site Name – URL
-
-IMAGE RULES:
-- Include relevant images using this exact format on its own line:
-  <!--IMAGE:IMAGE_URL|ALT_TEXT|SOURCE_NAME-->
-- Only include images genuinely relevant to the query (max 3)
-- Never include logos, icons, or unrelated images
 
 SOURCES:
 ${sourceContext}
@@ -308,7 +313,9 @@ ${sourceContext}
 AVAILABLE IMAGES:
 ${imageList || 'No images found'}
 
-USER QUERY: "${query}"`;
+USER QUERY: "${query}"
+
+Now provide a detailed, professional answer. Use HTML tables for any tabular data.`;
 }
 
 // ========== MODEL HEALTH TRACKER ==========
