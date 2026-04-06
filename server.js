@@ -8,7 +8,6 @@ const cosineSimilarity = require('cosine-similarity');
 const { pipeline } = require('@xenova/transformers');
 const fs = require('fs');
 const path = require('path');
-const { GoogleGenAI } = require("@google/genai");
 const cheerio = require('cheerio');
 
 const app = express();
@@ -23,23 +22,13 @@ app.use(cors({
 app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ========== Clients ==========
+// ========== Groq Client ==========
 let groq;
 try {
   groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   console.log('✅ Groq client initialized');
 } catch (err) {
   console.warn('⚠️ Groq API key not configured');
-}
-
-let googleAi;
-try {
-  if (process.env.GOOGLE_API_KEY) {
-    googleAi = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
-    console.log('✅ Google Gemini client initialized');
-  }
-} catch (err) {
-  console.warn('⚠️ Google Gemini API key not configured');
 }
 
 // ========== Email ==========
@@ -121,7 +110,6 @@ function extractImages(content) {
 
 // ========== WEB SEARCH + SCRAPE + IMAGE EXTRACTION ==========
 
-// Domains that block scraping — use snippet only, skip full fetch
 const BLOCKED_DOMAINS = [
   'reddit.com', 'facebook.com', 'twitter.com', 'x.com',
   'instagram.com', 'linkedin.com', 'tiktok.com', 'quora.com',
@@ -135,7 +123,6 @@ function isBlockedDomain(url) {
   } catch { return true; }
 }
 
-// DuckDuckGo wraps result URLs in a redirect — resolve to real URL
 function resolveDDGUrl(rawHref) {
   try {
     if (rawHref.startsWith('//duckduckgo.com/l/?')) {
@@ -148,7 +135,6 @@ function resolveDDGUrl(rawHref) {
   return null;
 }
 
-// Step 1 — Search DuckDuckGo, return top N results with title + url + snippet
 async function searchDuckDuckGo(query, maxResults = 5) {
   try {
     const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
@@ -182,7 +168,6 @@ async function searchDuckDuckGo(query, maxResults = 5) {
   }
 }
 
-// Step 2 — Scrape a URL: extract clean text + relevant images
 async function scrapeURL(url) {
   if (isBlockedDomain(url)) return { text: '', images: [] };
   try {
@@ -197,10 +182,8 @@ async function scrapeURL(url) {
     });
     const $ = cheerio.load(response.data);
 
-    // Strip noise
     $('script, style, nav, footer, header, aside, .ad, .ads, .advertisement, .cookie, .popup, .modal, iframe, noscript').remove();
 
-    // Extract main text — try semantic containers first
     let text = '';
     for (const selector of ['article', 'main', '[role="main"]', '.content', '.post-content', '.article-body', 'body']) {
       const el = $(selector).first();
@@ -211,7 +194,6 @@ async function scrapeURL(url) {
     }
     text = text.substring(0, 4000);
 
-    // Extract images — filter out icons, logos, tiny images, SVGs
     const baseUrl = new URL(url).origin;
     const images = [];
     const seenSrcs = new Set();
@@ -235,12 +217,11 @@ async function scrapeURL(url) {
 
     return { text, images };
   } catch (err) {
-    console.log(`⚠️  Could not scrape ${url}: ${err.message}`);
+    console.log(`⚠️ Could not scrape ${url}: ${err.message}`);
     return { text: '', images: [] };
   }
 }
 
-// Step 3 — Orchestrate: search + parallel scrape all pages
 async function fullWebSearch(query) {
   const searchResults = await searchDuckDuckGo(query, 5);
   if (!searchResults.length) return { pages: [], allImages: [] };
@@ -257,7 +238,6 @@ async function fullWebSearch(query) {
     };
   }));
 
-  // Collect all images tagged with their source
   const allImages = [];
   for (const page of pages) {
     for (const img of page.images) {
@@ -275,7 +255,6 @@ async function fullWebSearch(query) {
   return { pages, allImages };
 }
 
-// Step 4 — Build rich LLM system prompt with scraped content + citation + image instructions
 function buildWebSearchPrompt(pages, allImages, query) {
   const sourceContext = pages
     .filter(p => p.text && p.text.length > 50)
@@ -286,26 +265,21 @@ function buildWebSearchPrompt(pages, allImages, query) {
     `IMAGE_${i + 1}: src="${img.src}" alt="${img.alt}" from_source=[${img.sourceIndex}]`
   ).join('\n');
 
-  return `You are a professional AI assistant with access to live web search results.
+  return `You are a helpful AI assistant with access to live web search results.
 
-FORMATTING RULES (CRITICAL):
-- Use clean markdown formatting.
-- For TABLES: Use HTML <table> tags with borders, NOT markdown pipes.
-  Example:
-  <table border="1" cellpadding="8" cellspacing="0" style="border-collapse: collapse; width: 100%;">
-    <thead><tr><th>Column 1</th><th>Column 2</th></tr></thead>
-    <tbody><tr><td>Data 1</td><td>Data 2</td></tr></tbody>
-  </table>
-- For LISTS: Use - or * for bullet points.
-- For HEADINGS: Use ## for section headings.
-- For BOLD: Use **text**.
-- Use proper spacing between sections.
+Answer the user's query using ONLY the sources below. Be detailed and helpful.
 
 CITATION RULES (mandatory):
-- Add inline citation numbers like [1], [2] after every fact.
+- Add inline citation numbers like [1], [2] after facts from sources
 - End your response with a "📚 Sources:" section:
   [1] Site Name – URL
   [2] Site Name – URL
+
+IMAGE RULES:
+- Include relevant images using this exact format on its own line:
+  <!--IMAGE:IMAGE_URL|ALT_TEXT|SOURCE_NAME-->
+- Only include images genuinely relevant to the query (max 3)
+- Never include logos, icons, or unrelated images
 
 SOURCES:
 ${sourceContext}
@@ -313,17 +287,12 @@ ${sourceContext}
 AVAILABLE IMAGES:
 ${imageList || 'No images found'}
 
-USER QUERY: "${query}"
-
-Now provide a detailed, professional answer. Use HTML tables for any tabular data.`;
+USER QUERY: "${query}"`;
 }
 
 // ========== MODEL HEALTH TRACKER ==========
-// Remembers which models hit 429 and when they can be retried
 const modelHealthMap = new Map();
-// Structure: { modelId -> { rateLimitedUntil: timestamp, failCount: number } }
-
-const BASE_COOLDOWN_MS = 60 * 1000; // 60s base, doubles each failure, max 10 min
+const BASE_COOLDOWN_MS = 60 * 1000;
 
 function markModelRateLimited(modelId) {
   const existing = modelHealthMap.get(modelId) || { failCount: 0 };
@@ -343,7 +312,7 @@ function markModelHealthy(modelId) {
 function isModelAvailable(modelId) {
   const health = modelHealthMap.get(modelId);
   if (!health) return true;
-  return Date.now() > health.rateLimitedUntil; // expired = allow one probe
+  return Date.now() > health.rateLimitedUntil;
 }
 
 function getModelCooldownSeconds(modelId) {
@@ -355,14 +324,12 @@ function getModelCooldownSeconds(modelId) {
 
 // ========== STRICT FREE MODEL FILTERS ==========
 
-// --- Groq ---
-// Only these model families are actually free on Groq's free tier
 const GROQ_FREE_PATTERNS = [
   /^llama/i, /^meta-llama/i, /^mixtral/i, /^gemma/i,
   /^qwen/i, /^deepseek/i, /^mistral/i, /^moonshotai/i,
   /^compound/i, /^playai/i
 ];
-// These exist in the API but are audio/guard/tool-preview — not chat-free models
+
 const GROQ_EXCLUDED_IDS = [
   'whisper-large-v3', 'whisper-large-v3-turbo', 'distil-whisper-large-v3-en',
   'llama-guard-3-8b', 'llama3-groq-8b-8192-tool-use-preview',
@@ -374,28 +341,14 @@ function isGroqModelFree(modelId) {
   return GROQ_FREE_PATTERNS.some(p => p.test(modelId));
 }
 
-// --- OpenRouter ---
-// BUG FIX: pricing values come as strings ("0" not 0), so === 0 always failed before
-// Now we parseFloat() before comparing, and require BOTH prompt AND completion to be 0
 function isOpenRouterModelFree(model) {
-  if (model.id.includes(':free')) return true; // most reliable signal
+  if (model.id.includes(':free')) return true;
   if (model.pricing) {
     const prompt = parseFloat(model.pricing.prompt);
     const completion = parseFloat(model.pricing.completion);
     if (!isNaN(prompt) && !isNaN(completion) && prompt === 0 && completion === 0) return true;
   }
   return false;
-}
-
-// --- Google ---
-// Exclude paid/turbo/premium/ultra variants
-const GOOGLE_EXCLUDED_PATTERNS = ['paid', 'turbo', 'premium', 'ultra'];
-
-function isGoogleModelFree(model) {
-  const name = (model.name || '').toLowerCase();
-  if (!model.supportedGenerationMethods?.includes('generateContent')) return false;
-  if (GOOGLE_EXCLUDED_PATTERNS.some(p => name.includes(p))) return false;
-  return name.includes('gemini');
 }
 
 // ========== Dynamic model fetching ==========
@@ -448,26 +401,6 @@ async function fetchOpenRouterModels() {
   }
 }
 
-async function fetchGoogleModels() {
-  if (!process.env.GOOGLE_API_KEY) return [];
-  try {
-    const response = await axios.get(
-      `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GOOGLE_API_KEY}`
-    );
-    const all = response.data.models || [];
-    const free = all.filter(isGoogleModelFree);
-    console.log(`   Google: ${free.length} free (from ${all.length} total)`);
-    return free.map(m => ({
-      id: m.name, name: formatModelName(m.name), provider: 'google',
-      context: m.inputTokenLimit || 1048576, free: true,
-      type: m.name.toLowerCase().includes('flash') ? 'vision' : undefined
-    }));
-  } catch (err) {
-    console.error('Failed to fetch Google models:', err.message);
-    return [];
-  }
-}
-
 function formatModelName(modelId) {
   let name = modelId
     .replace(':free', '').replace('-instruct', '').replace('-preview', '')
@@ -477,21 +410,20 @@ function formatModelName(modelId) {
   name = name.split(' ').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   if (/^(llama|meta-llama|mixtral|qwen|deepseek|gemma|mistral|moonshotai)/i.test(modelId)) name += ' (Groq)';
   else if (modelId.includes(':')) name += ' (Free)';
-  else if (/^(gemini|models\/gemini)/i.test(modelId)) name += ' (Google)';
   return name;
 }
 
 async function refreshModels() {
-  console.log('🔄 Fetching FREE models from all providers...');
-  const [groqModels, openRouterModels, googleModels] = await Promise.all([
-    fetchGroqModels(), fetchOpenRouterModels(), fetchGoogleModels()
+  console.log('🔄 Fetching FREE models from providers...');
+  const [groqModels, openRouterModels] = await Promise.all([
+    fetchGroqModels(), fetchOpenRouterModels()
   ]);
-  const all = [...groqModels, ...openRouterModels, ...googleModels];
+  const all = [...groqModels, ...openRouterModels];
   const unique = Array.from(new Map(all.map(m => [m.id, m])).values());
   unique.sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
   cachedModels = unique;
   lastFetchTime = Date.now();
-  console.log(`📊 Total free models: ${cachedModels.length} (Groq: ${groqModels.length}, OpenRouter: ${openRouterModels.length}, Google: ${googleModels.length})`);
+  console.log(`📊 Total free models: ${cachedModels.length} (Groq: ${groqModels.length}, OpenRouter: ${openRouterModels.length})`);
   return cachedModels;
 }
 
@@ -521,7 +453,6 @@ app.get('/api/health', async (req, res) => {
   });
 });
 
-// Models endpoint — returns availability + cooldown so frontend can grey out busy models
 app.get('/api/models', async (req, res) => {
   try {
     const models = await getModels();
@@ -544,7 +475,6 @@ app.post('/api/models/refresh', async (req, res) => {
   }
 });
 
-// ========== Auto-title generation ==========
 app.post('/api/chat/title', async (req, res) => {
   const { message, modelId } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
@@ -631,9 +561,7 @@ async function streamFromModel(model, cleanMessages, res) {
       const content = chunk.choices[0]?.delta?.content || '';
       if (content) res.write(content);
     }
-  }
-
-  else if (model.provider === 'openrouter') {
+  } else if (model.provider === 'openrouter') {
     if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
     const response = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
@@ -661,43 +589,9 @@ async function streamFromModel(model, cleanMessages, res) {
       response.data.on('end', resolve);
       response.data.on('error', reject);
     });
+  } else {
+    throw new Error(`Unsupported provider: ${model.provider}`);
   }
-
-  else if (model.provider === 'google') {
-    if (!googleAi) throw new Error('Google Gemini not configured');
-    const history = [];
-    for (let i = 0; i < cleanMessages.length - 1; i++) {
-      const msg = cleanMessages[i];
-      let parts = [];
-      if (typeof msg.content === 'string') parts = [{ text: msg.content }];
-      else if (Array.isArray(msg.content)) {
-        const tp = msg.content.find(p => p.type === 'text');
-        if (tp) parts.push({ text: tp.text });
-        for (const img of extractImages(msg.content))
-          parts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
-      }
-      history.push({ role: msg.role === 'assistant' ? 'model' : 'user', parts });
-    }
-    const lastMsg = cleanMessages[cleanMessages.length - 1];
-    let currentParts = [];
-    if (typeof lastMsg.content === 'string') currentParts = [{ text: lastMsg.content }];
-    else if (Array.isArray(lastMsg.content)) {
-      const tp = lastMsg.content.find(p => p.type === 'text');
-      if (tp) currentParts.push({ text: tp.text });
-      for (const img of extractImages(lastMsg.content))
-        currentParts.push({ inlineData: { mimeType: img.mimeType, data: img.data } });
-    }
-    const chat = googleAi.chats.create({
-      model: model.id, history,
-      config: { temperature: 0.7, maxOutputTokens: 1024 }
-    });
-    const response = await chat.sendMessageStream({ message: currentParts });
-    for await (const chunk of response) {
-      if (chunk.text) res.write(chunk.text);
-    }
-  }
-
-  else throw new Error(`Unsupported provider: ${model.provider}`);
 }
 
 // ========== CHAT STREAMING ENDPOINT ==========
@@ -713,7 +607,6 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!requestedModel) return res.status(400).json({ error: 'Invalid model: ' + modelId });
   if (!requestedModel.free) return res.status(403).json({ error: 'This model requires payment.' });
 
-  // Clean messages
   let cleanMessages = messages
     .filter(m => m && (typeof m.content === 'string' || Array.isArray(m.content)) && m.content.length > 0)
     .map(m => ({ role: m.role, content: m.content }));
@@ -721,8 +614,7 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!cleanMessages.length) { res.write('Please start a new conversation.'); res.end(); return; }
   if (cleanMessages[cleanMessages.length - 1].role !== 'user') { res.write("I'm waiting for your message."); res.end(); return; }
 
-  // ===== FULL WEB SEARCH: scrape pages + extract images =====
-  let searchImages = []; // collected images sent to frontend as sentinel at end of stream
+  let searchImages = [];
 
   if (enableSearch) {
     const lastUserMsg = cleanMessages.filter(m => m.role === 'user').pop();
@@ -731,7 +623,6 @@ app.post('/api/chat/stream', async (req, res) => {
         const { pages, allImages } = await fullWebSearch(lastUserMsg.content);
         searchImages = allImages.slice(0, 6);
         if (pages.length > 0) {
-          // Replace any existing system message with rich scraped context + citation instructions
           cleanMessages = cleanMessages.filter(m => m.role !== 'system');
           cleanMessages.unshift({
             role: 'system',
@@ -740,12 +631,10 @@ app.post('/api/chat/stream', async (req, res) => {
         }
       } catch (err) {
         console.error('Web search pipeline error:', err.message);
-        // Degrade gracefully — continue without search context
       }
     }
   }
 
-  // PII guardrail
   for (const msg of cleanMessages) {
     const text = typeof msg.content === 'string' ? msg.content : (msg.content.find?.(p => p.type === 'text')?.text || '');
     if (containsPII(text)) {
@@ -757,15 +646,7 @@ app.post('/api/chat/stream', async (req, res) => {
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Transfer-Encoding', 'chunked');
 
-  // ===== SMART FALLBACK QUEUE =====
-  // 1. Try requested model first
-  // 2. If rate-limited, silently try up to 2 more models from same provider
-  // 3. If all same-provider models fail, try other providers
-  // 4. Only show error if everything fails
-
   const MAX_ATTEMPTS = 3;
-
-  // Build ordered candidate list: requested model → same provider alternatives → other providers
   const sameProv = availableModels.filter(m =>
     m.id !== requestedModel.id && m.free && m.provider === requestedModel.provider && isModelAvailable(m.id)
   );
@@ -781,13 +662,12 @@ app.post('/api/chat/stream', async (req, res) => {
 
   for (const model of attemptQueue) {
     if (!isModelAvailable(model.id)) {
-      console.log(`⏭️  Skipping ${model.id} — in cooldown (${getModelCooldownSeconds(model.id)}s left)`);
+      console.log(`⏭️ Skipping ${model.id} — in cooldown (${getModelCooldownSeconds(model.id)}s left)`);
       continue;
     }
 
     try {
       if (usedFallback) {
-        // Transparent notice to user — rendered inline before the response content
         res.write(`\n⚡ *Switched to ${model.name} (previous model is temporarily busy)*\n\n`);
       }
 
@@ -804,7 +684,7 @@ app.post('/api/chat/stream', async (req, res) => {
 
       if (status === 429) {
         markModelRateLimited(model.id);
-        console.warn(`⚠️  429 on ${model.id} — trying next model`);
+        console.warn(`⚠️ 429 on ${model.id} — trying next model`);
         usedFallback = true;
       } else if (status === 401) {
         res.write('❌ Invalid API key. Please check your configuration.');
@@ -819,17 +699,12 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!succeeded) {
     const status = lastError?.status || lastError?.response?.status;
     if (status === 429) {
-      res.write(
-        '⏰ All models are currently busy with too many requests. ' +
-        'Please wait a moment and try again, or select a different model from the model selector.'
-      );
+      res.write('⏰ All models are currently busy with too many requests. Please wait a moment and try again, or select a different model from the model selector.');
     } else {
       res.write('❌ Unable to get a response right now. Please try again or switch models.');
     }
   }
 
-  // Append image metadata as a sentinel for the frontend to parse and render
-  // Format: <!--SEARCH_IMAGES_JSON:[{src, alt, sourceName, sourceUrl, sourceIndex}]-->
   if (enableSearch && searchImages.length > 0) {
     const payload = JSON.stringify(searchImages);
     res.write(`\n\n<!--SEARCH_IMAGES_JSON:${payload}-->`);
@@ -839,8 +714,6 @@ app.post('/api/chat/stream', async (req, res) => {
 });
 
 // ========== Standalone Search Endpoint ==========
-// Frontend can call this independently to show search results + images
-// without needing to go through a full chat request
 app.post('/api/search', async (req, res) => {
   const { query } = req.body;
   if (!query) return res.status(400).json({ error: 'Query required' });
@@ -888,7 +761,6 @@ app.listen(PORT, '0.0.0.0', async () => {
   console.log(`🤖 FREE Models loaded: ${models.length} total`);
   console.log(`🔑 Groq:       ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
-  console.log(`🔑 Google:     ${process.env.GOOGLE_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`📧 Email:      ${process.env.SMTP_USER ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🌐 Web search: ✅ Full scraping + image extraction enabled`);
   console.log(`🔄 Models refresh every hour\n`);
