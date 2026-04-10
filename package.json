@@ -1,7 +1,7 @@
 {
   "name": "pickmo-backend",
-  "version": "1.0.0",
-  "description": "Backend for Pickmo.ai chatbot",
+  "version": "2.0.0",
+  "description": "Pickmo.ai Backend — Agentic AI Chatbot with web search, RAG, and MCP",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -16,14 +16,13 @@
     "axios": "^1.4.0",
     "@xenova/transformers": "^2.6.0",
     "cosine-similarity": "^1.0.1",
-    "@google/genai": "^0.7.0",
     "cheerio": "^1.0.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": ["ai", "chatbot", "groq", "rag", "agents", "mcp"],
+  "author": "Pickmo.ai",
+  "license": "MIT",
   "type": "commonjs"
 }

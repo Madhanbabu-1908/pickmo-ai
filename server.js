@@ -100,13 +100,204 @@ function toPlainText(content) {
   return '';
 }
 
-function extractImages(content) {
-  if (!Array.isArray(content)) return [];
-  return content.filter(p => p.type === 'image_url').map(p => ({
-    mimeType: 'image/jpeg',
-    data: p.image_url.url.split(',')[1]
-  }));
+// ========================================================
+// ============ CENTRALIZED AGENTIC ARCHITECTURE ==========
+// ========================================================
+//
+//  AgentOrchestrator coordinates specialized agents:
+//
+//   ┌─────────────────────────────────────────────────┐
+//   │            AgentOrchestrator                    │
+//   │  Routes requests to the right agent based on    │
+//   │  intent classification                          │
+//   └────────────┬────────────────────────────────────┘
+//                │
+//     ┌──────────┼──────────────────┬──────────────────┐
+//     ▼          ▼                  ▼                  ▼
+//  WebSearch   RAGAgent         CodeAgent         GeneralAgent
+//  Agent       (docs context)   (code tasks)      (fallback)
+//
+// ========================================================
+
+class AgentOrchestrator {
+  constructor() {
+    this.agents = {
+      web_search: new WebSearchAgent(),
+      rag:        new RAGAgent(),
+      code:       new CodeAgent(),
+      general:    new GeneralAgent(),
+    };
+  }
+
+  /**
+   * Classify intent from user message and context flags.
+   * Returns one of: 'web_search' | 'rag' | 'code' | 'general'
+   */
+  classifyIntent(userMessage, enableSearch, hasDocuments) {
+    const msg = userMessage.toLowerCase();
+
+    // Explicit web search request
+    if (enableSearch) return 'web_search';
+
+    // RAG: documents are loaded
+    if (hasDocuments) return 'rag';
+
+    // Code tasks
+    const codeKeywords = ['write code', 'debug', 'fix bug', 'python', 'javascript', 'function',
+      'class', 'algorithm', 'sql', 'html', 'css', 'typescript', 'api', 'script',
+      'program', 'implement', 'refactor', 'unit test', 'compile', 'syntax'];
+    if (codeKeywords.some(k => msg.includes(k))) return 'code';
+
+    // Web search triggers — current events, facts, real-time
+    const webKeywords = ['latest', 'recent', 'today', 'news', 'current', '2024', '2025', '2026',
+      'what is the price', 'stock', 'weather', 'who won', 'search', 'look up',
+      'find information', 'real-time'];
+    if (webKeywords.some(k => msg.includes(k))) return 'web_search';
+
+    return 'general';
+  }
+
+  /**
+   * Main entry point — builds the system prompt for the right agent.
+   */
+  async buildSystemPrompt(userMessage, enableSearch, hasDocuments, ragContext = '') {
+    const intent = this.classifyIntent(userMessage, enableSearch, hasDocuments);
+    console.log(`🤖 AgentOrchestrator → routing to: ${intent.toUpperCase()} agent`);
+
+    const agent = this.agents[intent];
+    return {
+      intent,
+      systemPrompt: agent.buildSystemPrompt(ragContext),
+      agentName: agent.name
+    };
+  }
 }
+
+// ─── Base Agent ───
+class BaseAgent {
+  constructor(name, description) {
+    this.name = name;
+    this.description = description;
+  }
+  buildSystemPrompt(context = '') {
+    return `You are a helpful AI assistant named Pickmo.ai.`;
+  }
+}
+
+// ─── General Agent ───
+class GeneralAgent extends BaseAgent {
+  constructor() {
+    super('GeneralAgent', 'Handles everyday conversation, reasoning, and Q&A');
+  }
+  buildSystemPrompt() {
+    return `You are Pickmo.ai — a friendly, intelligent AI assistant.
+- Be concise, helpful, and conversational.
+- Use markdown formatting where helpful (code blocks, bullet lists, bold text).
+- If the user asks something that requires real-time data, suggest enabling Web Search.
+- Be honest when you're uncertain about something.
+- Responsible AI: do not provide harmful, misleading, or dangerous information.`;
+  }
+}
+
+// ─── Code Agent ───
+class CodeAgent extends BaseAgent {
+  constructor() {
+    super('CodeAgent', 'Specializes in code writing, debugging, and explanation');
+  }
+  buildSystemPrompt() {
+    return `You are Pickmo.ai — an expert software engineer and code assistant.
+- Always wrap code in fenced code blocks with the correct language tag (e.g. \`\`\`python).
+- Explain what the code does step by step.
+- When debugging, explain the root cause and provide a fixed version.
+- Follow best practices: clean code, comments, error handling.
+- If multiple languages/approaches exist, briefly compare them.
+- Responsible AI: do not help with malicious code, exploits, or security attacks.`;
+  }
+}
+
+// ─── RAG Agent ───
+class RAGAgent extends BaseAgent {
+  constructor() {
+    super('RAGAgent', 'Answers questions based on uploaded documents');
+  }
+  buildSystemPrompt(ragContext = '') {
+    return `You are Pickmo.ai — a document analysis assistant.
+The user has uploaded documents. Use ONLY the context below to answer their question.
+If the answer is not found in the documents, say so clearly.
+
+DOCUMENT CONTEXT:
+${ragContext}
+
+Rules:
+- Always cite which document your answer came from, using [Doc: filename] format.
+- Do not make up information not present in the documents.
+- If asked something outside the documents, say: "I can only answer based on the uploaded documents."
+- Responsible AI: summarize fairly and do not misrepresent document content.`;
+  }
+}
+
+// ─── Web Search Agent ───
+class WebSearchAgent extends BaseAgent {
+  constructor() {
+    super('WebSearchAgent', 'Searches the web and provides cited, sourced answers');
+  }
+  buildSystemPrompt(webContext = '') {
+    return webContext; // Populated dynamically after fetching search results
+  }
+}
+
+// ========== MCP Tool Registry ==========
+// MCP = Model Context Protocol — a structured way to define "tools" the AI can reference.
+// Each tool has a name, description, and input schema.
+// This registry is surfaced at /api/mcp/tools for the frontend to display.
+
+const MCP_TOOLS = [
+  {
+    name: 'web_search',
+    description: 'Search the web for real-time information, news, prices, and current events.',
+    inputSchema: { query: 'string (the search query)' },
+    icon: '🌐',
+    category: 'Search'
+  },
+  {
+    name: 'document_analysis',
+    description: 'Analyze uploaded documents (PDF, TXT, DOCX) and answer questions about them.',
+    inputSchema: { chatId: 'string', query: 'string' },
+    icon: '📄',
+    category: 'Documents'
+  },
+  {
+    name: 'code_assist',
+    description: 'Write, debug, and explain code in any programming language.',
+    inputSchema: { language: 'string', task: 'string' },
+    icon: '💻',
+    category: 'Code'
+  },
+  {
+    name: 'summarize',
+    description: 'Summarize long text, articles, or documents concisely.',
+    inputSchema: { content: 'string', length: 'short|medium|detailed' },
+    icon: '📝',
+    category: 'Text'
+  },
+  {
+    name: 'translate',
+    description: 'Translate text between languages.',
+    inputSchema: { text: 'string', targetLanguage: 'string' },
+    icon: '🌍',
+    category: 'Language'
+  },
+  {
+    name: 'explain',
+    description: 'Explain complex concepts in simple terms.',
+    inputSchema: { concept: 'string', level: 'beginner|intermediate|expert' },
+    icon: '🎓',
+    category: 'Learning'
+  }
+];
+
+// Singleton orchestrator
+const orchestrator = new AgentOrchestrator();
 
 // ========== WEB SEARCH + SCRAPE + IMAGE EXTRACTION ==========
 
@@ -141,7 +332,7 @@ async function searchDuckDuckGo(query, maxResults = 5) {
     const response = await axios.get(url, {
       timeout: 8000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.5'
       }
@@ -175,13 +366,12 @@ async function scrapeURL(url) {
       timeout: 6000,
       maxContentLength: 500000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Accept': 'text/html,application/xhtml+xml',
         'Accept-Language': 'en-US,en;q=0.5'
       }
     });
     const $ = cheerio.load(response.data);
-
     $('script, style, nav, footer, header, aside, .ad, .ads, .advertisement, .cookie, .popup, .modal, iframe, noscript').remove();
 
     let text = '';
@@ -255,6 +445,10 @@ async function fullWebSearch(query) {
   return { pages, allImages };
 }
 
+/**
+ * Build a system prompt for the WebSearchAgent.
+ * Includes MANDATORY source citation rules for Responsible AI.
+ */
 function buildWebSearchPrompt(pages, allImages, query) {
   const sourceContext = pages
     .filter(p => p.text && p.text.length > 50)
@@ -265,15 +459,20 @@ function buildWebSearchPrompt(pages, allImages, query) {
     `IMAGE_${i + 1}: src="${img.src}" alt="${img.alt}" from_source=[${img.sourceIndex}]`
   ).join('\n');
 
-  return `You are a helpful AI assistant with access to live web search results.
+  return `You are Pickmo.ai — a helpful AI assistant with real-time web search capability.
 
-Answer the user's query using ONLY the sources below. Be detailed and helpful.
+Answer the user's query using the web sources below. Be detailed, helpful, and accurate.
 
-CITATION RULES (mandatory):
-- Add inline citation numbers like [1], [2] after facts from sources
-- End your response with a "📚 Sources:" section:
-  [1] Site Name – URL
-  [2] Site Name – URL
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RESPONSIBLE AI — MANDATORY CITATION RULES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. Add inline citation numbers like [1], [2] after each fact from sources.
+2. End your response with a "📚 **Sources:**" section listing all sources used:
+   [1] Site Name – https://url-here
+   [2] Site Name – https://url-here
+3. If information is NOT in the sources, say "I could not find this in the current sources."
+4. Never fabricate facts or URLs. Only cite sources that actually appeared.
+5. Indicate the date range of sources if relevant (e.g., "As of early 2025...").
 
 IMAGE RULES:
 - Include relevant images using this exact format on its own line:
@@ -322,8 +521,7 @@ function getModelCooldownSeconds(modelId) {
   return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
 }
 
-// ========== STRICT FREE MODEL FILTERS ==========
-
+// ========== FREE MODEL FILTERS ==========
 const GROQ_FREE_PATTERNS = [
   /^llama/i, /^meta-llama/i, /^mixtral/i, /^gemma/i,
   /^qwen/i, /^deepseek/i, /^mistral/i, /^moonshotai/i,
@@ -423,7 +621,7 @@ async function refreshModels() {
   unique.sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
   cachedModels = unique;
   lastFetchTime = Date.now();
-  console.log(`📊 Total free models: ${cachedModels.length} (Groq: ${groqModels.length}, OpenRouter: ${openRouterModels.length})`);
+  console.log(`📊 Total free models: ${cachedModels.length}`);
   return cachedModels;
 }
 
@@ -435,6 +633,8 @@ async function getModels() {
 }
 
 // ========== Routes ==========
+
+// Health check
 app.get('/api/health', async (req, res) => {
   const models = await getModels();
   const rateLimited = [];
@@ -442,17 +642,20 @@ app.get('/api/health', async (req, res) => {
     if (Date.now() < h.rateLimitedUntil) rateLimited.push({ id, cooldownSeconds: getModelCooldownSeconds(id) });
   }
   res.json({
-    status: 'ok', message: 'Backend is running!',
+    status: 'ok', message: 'Pickmo.ai Backend is running!',
     timestamp: new Date().toISOString(),
     embedding_mode: EMBEDDING_MODE,
     total_models: models.length,
     available_models: models.filter(m => isModelAvailable(m.id)).length,
+    agents: Object.keys(orchestrator.agents),
+    mcp_tools: MCP_TOOLS.length,
     documents: Array.from(documentsByChat.values()).reduce((s, a) => s + a.length, 0),
     last_refresh: lastFetchTime,
     rate_limited_models: rateLimited
   });
 });
 
+// Models list
 app.get('/api/models', async (req, res) => {
   try {
     const models = await getModels();
@@ -466,6 +669,7 @@ app.get('/api/models', async (req, res) => {
   }
 });
 
+// Refresh models
 app.post('/api/models/refresh', async (req, res) => {
   try {
     await refreshModels();
@@ -475,6 +679,28 @@ app.post('/api/models/refresh', async (req, res) => {
   }
 });
 
+// ─── MCP Tools endpoint ───
+app.get('/api/mcp/tools', (req, res) => {
+  res.json({
+    protocol: 'MCP v1.0',
+    description: 'Pickmo.ai Model Context Protocol — available tools the AI can use',
+    tools: MCP_TOOLS
+  });
+});
+
+// ─── Agent status endpoint ───
+app.get('/api/agents', (req, res) => {
+  res.json({
+    orchestrator: 'AgentOrchestrator',
+    agents: Object.entries(orchestrator.agents).map(([key, agent]) => ({
+      id: key,
+      name: agent.name,
+      description: agent.description
+    }))
+  });
+});
+
+// Chat title generation
 app.post('/api/chat/title', async (req, res) => {
   const { message, modelId } = req.body;
   if (!message) return res.status(400).json({ error: 'Message required' });
@@ -555,7 +781,7 @@ async function streamFromModel(model, cleanMessages, res) {
     if (!groq) throw new Error('Groq not configured');
     const textOnly = cleanMessages.map(m => ({ role: m.role, content: toPlainText(m.content) }));
     const stream = await groq.chat.completions.create({
-      model: model.id, messages: textOnly, stream: true, max_tokens: 1024
+      model: model.id, messages: textOnly, stream: true, max_tokens: 2048
     });
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
@@ -565,7 +791,7 @@ async function streamFromModel(model, cleanMessages, res) {
     if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
     const response = await axios.post(
       'https://openrouter.ai/api/v1/chat/completions',
-      { model: model.id, messages: cleanMessages, stream: true, max_tokens: 1024 },
+      { model: model.id, messages: cleanMessages, stream: true, max_tokens: 2048 },
       {
         headers: {
           Authorization: `Bearer ${process.env.OPENROUTER_API_KEY}`,
@@ -594,7 +820,7 @@ async function streamFromModel(model, cleanMessages, res) {
   }
 }
 
-// ========== CHAT STREAMING ENDPOINT ==========
+// ========== CHAT STREAMING ENDPOINT (with Agentic routing) ==========
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages, enableSearch = false } = req.body;
 
@@ -614,27 +840,7 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!cleanMessages.length) { res.write('Please start a new conversation.'); res.end(); return; }
   if (cleanMessages[cleanMessages.length - 1].role !== 'user') { res.write("I'm waiting for your message."); res.end(); return; }
 
-  let searchImages = [];
-
-  if (enableSearch) {
-    const lastUserMsg = cleanMessages.filter(m => m.role === 'user').pop();
-    if (lastUserMsg && typeof lastUserMsg.content === 'string') {
-      try {
-        const { pages, allImages } = await fullWebSearch(lastUserMsg.content);
-        searchImages = allImages.slice(0, 6);
-        if (pages.length > 0) {
-          cleanMessages = cleanMessages.filter(m => m.role !== 'system');
-          cleanMessages.unshift({
-            role: 'system',
-            content: buildWebSearchPrompt(pages, searchImages, lastUserMsg.content)
-          });
-        }
-      } catch (err) {
-        console.error('Web search pipeline error:', err.message);
-      }
-    }
-  }
-
+  // PII check
   for (const msg of cleanMessages) {
     const text = typeof msg.content === 'string' ? msg.content : (msg.content.find?.(p => p.type === 'text')?.text || '');
     if (containsPII(text)) {
@@ -643,8 +849,55 @@ app.post('/api/chat/stream', async (req, res) => {
     }
   }
 
+  let searchImages = [];
+  const lastUserMsg = cleanMessages.filter(m => m.role === 'user').pop();
+  const userText = typeof lastUserMsg?.content === 'string' ? lastUserMsg.content : toPlainText(lastUserMsg?.content);
+
+  // Check if chat has documents
+  const chatId = req.body.chatId;
+  const hasDocuments = chatId && (documentsByChat.get(chatId) || []).length > 0;
+
+  // ─── Agentic routing via orchestrator ───
+  let ragContext = '';
+  if (hasDocuments && chatId) {
+    try {
+      const queryEmbed = await getEmbedding(userText);
+      const docs = documentsByChat.get(chatId) || [];
+      const scored = docs.map(d => ({ ...d, score: cosineSimilarity(queryEmbed, d.embedding) }));
+      scored.sort((a, b) => b.score - a.score);
+      ragContext = scored.slice(0, 3).map(d => `[Doc: ${d.name}]\n${d.text}`).join('\n\n---\n\n');
+    } catch {}
+  }
+
+  const { intent, systemPrompt, agentName } = await orchestrator.buildSystemPrompt(
+    userText, enableSearch, hasDocuments, ragContext
+  );
+
+  // For web search agent, fetch real data first
+  let finalSystemPrompt = systemPrompt;
+  if (intent === 'web_search') {
+    try {
+      const { pages, allImages } = await fullWebSearch(userText);
+      searchImages = allImages.slice(0, 6);
+      if (pages.length > 0) {
+        finalSystemPrompt = buildWebSearchPrompt(pages, searchImages, userText);
+      } else {
+        finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt();
+      }
+    } catch (err) {
+      console.error('Web search pipeline error:', err.message);
+      finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt();
+    }
+  }
+
+  // Inject agent system prompt (remove any existing system messages first)
+  cleanMessages = cleanMessages.filter(m => m.role !== 'system');
+  cleanMessages.unshift({ role: 'system', content: finalSystemPrompt });
+
   res.setHeader('Content-Type', 'text/plain');
   res.setHeader('Transfer-Encoding', 'chunked');
+  // Send agent info as first metadata line (parsed by frontend)
+  res.write(`<!--AGENT:${agentName}-->`);
 
   const MAX_ATTEMPTS = 3;
   const sameProv = availableModels.filter(m =>
@@ -671,7 +924,7 @@ app.post('/api/chat/stream', async (req, res) => {
         res.write(`\n⚡ *Switched to ${model.name} (previous model is temporarily busy)*\n\n`);
       }
 
-      console.log(`💬 ${usedFallback ? '[fallback] ' : ''}Trying: ${model.name} (${model.provider})`);
+      console.log(`💬 [${agentName}] ${usedFallback ? '[fallback] ' : ''}Trying: ${model.name} (${model.provider})`);
       await streamFromModel(model, cleanMessages, res);
 
       markModelHealthy(model.id);
@@ -681,7 +934,6 @@ app.post('/api/chat/stream', async (req, res) => {
     } catch (err) {
       lastError = err;
       const status = err.status || err.response?.status;
-
       if (status === 429) {
         markModelRateLimited(model.id);
         console.warn(`⚠️ 429 on ${model.id} — trying next model`);
@@ -699,7 +951,7 @@ app.post('/api/chat/stream', async (req, res) => {
   if (!succeeded) {
     const status = lastError?.status || lastError?.response?.status;
     if (status === 429) {
-      res.write('⏰ All models are currently busy with too many requests. Please wait a moment and try again, or select a different model from the model selector.');
+      res.write('⏰ All models are currently busy. Please wait a moment and try again, or select a different model.');
     } else {
       res.write('❌ Unable to get a response right now. Please try again or switch models.');
     }
@@ -721,10 +973,7 @@ app.post('/api/search', async (req, res) => {
     const { pages, allImages } = await fullWebSearch(query);
     res.json({
       pages: pages.map(p => ({
-        index: p.index,
-        title: p.title,
-        url: p.url,
-        snippet: p.snippet,
+        index: p.index, title: p.title, url: p.url, snippet: p.snippet,
         hasFullContent: p.text.length > 100
       })),
       images: allImages.slice(0, 8)
@@ -756,12 +1005,14 @@ const PORT = process.env.PORT || 10000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`\n✅ Pickmo.ai Backend running on port ${PORT}`);
   console.log(`📊 Embedding mode: ${EMBEDDING_MODE}`);
+  console.log(`🤖 Agents: ${Object.keys(orchestrator.agents).join(', ')}`);
+  console.log(`🔧 MCP Tools: ${MCP_TOOLS.length} registered`);
   loadDocumentsFromDisk();
   const models = await getModels();
   console.log(`🤖 FREE Models loaded: ${models.length} total`);
   console.log(`🔑 Groq:       ${process.env.GROQ_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`🔑 OpenRouter: ${process.env.OPENROUTER_API_KEY ? '✅ Configured' : '❌ Not configured'}`);
   console.log(`📧 Email:      ${process.env.SMTP_USER ? '✅ Configured' : '❌ Not configured'}`);
-  console.log(`🌐 Web search: ✅ Full scraping + image extraction enabled`);
+  console.log(`🌐 Web search: ✅ Full scraping + image extraction + citation enabled`);
   console.log(`🔄 Models refresh every hour\n`);
 });
