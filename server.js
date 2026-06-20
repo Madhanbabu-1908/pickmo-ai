@@ -481,9 +481,9 @@ Answer the user's query using the web sources below. Be detailed, helpful, and a
 RESPONSIBLE AI — MANDATORY CITATION RULES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 1. Add inline citation numbers like [1], [2] after each fact from sources.
-2. End your response with a "📚 **Sources:**" section listing all sources used:
-   [1] Site Name – https://url-here
-   [2] Site Name – https://url-here
+2. End your response with a "📚 **Sources:**" section listing all sources as markdown links:
+   [1] [Site Name](https://url-here)
+   [2] [Site Name](https://url-here)
 3. If information is NOT in the sources, say "I could not find this in the current sources."
 4. Never fabricate facts or URLs. Only cite sources that actually appeared.
 5. Indicate the date range of sources if relevant (e.g., "As of early 2025...").
