@@ -795,15 +795,13 @@ function createThinkFilter(res) {
   let buffer = '';
   let inThink = false;
 
-  return function write(content) {
+  function write(content) {
     buffer += content;
 
     while (true) {
       if (!inThink) {
         const openIdx = buffer.indexOf('<think>');
         if (openIdx === -1) {
-          // No open tag found — flush everything except a small tail
-          // in case "<think>" is split across chunk boundaries
           const safeLen = Math.max(0, buffer.length - 7);
           if (safeLen > 0) {
             res.write(buffer.slice(0, safeLen));
@@ -811,28 +809,35 @@ function createThinkFilter(res) {
           }
           return;
         }
-        // Flush text before the tag, then enter "in think" mode
         res.write(buffer.slice(0, openIdx));
         buffer = buffer.slice(openIdx + '<think>'.length);
         inThink = true;
       } else {
         const closeIdx = buffer.indexOf('</think>');
         if (closeIdx === -1) {
-          // Still inside reasoning block — discard everything except
-          // a small tail in case "</think>" is split across chunks
           const safeLen = Math.max(0, buffer.length - 8);
           buffer = buffer.slice(safeLen);
           return;
         }
-        // Discard the reasoning content, exit "in think" mode
         buffer = buffer.slice(closeIdx + '</think>'.length);
         inThink = false;
       }
     }
-  };
+  }
+
+  function flush() {
+    // Stream ended — write out whatever's left in buffer,
+    // as long as we're not still inside an unclosed <think> block
+    if (!inThink && buffer) {
+      res.write(buffer);
+      buffer = '';
+    }
+  }
+
+  return { write, flush };
 }
 async function streamFromModel(model, cleanMessages, res) {
-  const writeFiltered = createThinkFilter(res);
+  const filter = createThinkFilter(res);
 
   if (model.provider === 'groq') {
     if (!groq) throw new Error('Groq not configured');
@@ -842,8 +847,9 @@ async function streamFromModel(model, cleanMessages, res) {
     });
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
-      if (content) writeFiltered(content);
+      if (content) filter.write(content);
     }
+    filter.flush();
   } else if (model.provider === 'openrouter') {
     if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
     const response = await axios.post(
@@ -864,19 +870,18 @@ async function streamFromModel(model, cleanMessages, res) {
             try {
               const json = JSON.parse(line.slice(6));
               const content = json.choices[0]?.delta?.content || '';
-              if (content) writeFiltered(content);
+              if (content) filter.write(content);
             } catch {}
           }
         }
       });
-      response.data.on('end', resolve);
+      response.data.on('end', () => { filter.flush(); resolve(); });
       response.data.on('error', reject);
     });
   } else {
     throw new Error(`Unsupported provider: ${model.provider}`);
   }
 }
-
 // ========== CHAT STREAMING ENDPOINT (with Agentic routing) ==========
 app.post('/api/chat/stream', async (req, res) => {
   const { modelId, messages, enableSearch = false } = req.body;
