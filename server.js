@@ -790,7 +790,50 @@ app.delete('/api/rag/delete/:chatId', (req, res) => {
 });
 
 // ========== CORE STREAM FUNCTION ==========
+// ========== Strip <think>...</think> reasoning blocks from streamed output ==========
+function createThinkFilter(res) {
+  let buffer = '';
+  let inThink = false;
+
+  return function write(content) {
+    buffer += content;
+
+    while (true) {
+      if (!inThink) {
+        const openIdx = buffer.indexOf('<think>');
+        if (openIdx === -1) {
+          // No open tag found — flush everything except a small tail
+          // in case "<think>" is split across chunk boundaries
+          const safeLen = Math.max(0, buffer.length - 7);
+          if (safeLen > 0) {
+            res.write(buffer.slice(0, safeLen));
+            buffer = buffer.slice(safeLen);
+          }
+          return;
+        }
+        // Flush text before the tag, then enter "in think" mode
+        res.write(buffer.slice(0, openIdx));
+        buffer = buffer.slice(openIdx + '<think>'.length);
+        inThink = true;
+      } else {
+        const closeIdx = buffer.indexOf('</think>');
+        if (closeIdx === -1) {
+          // Still inside reasoning block — discard everything except
+          // a small tail in case "</think>" is split across chunks
+          const safeLen = Math.max(0, buffer.length - 8);
+          buffer = buffer.slice(safeLen);
+          return;
+        }
+        // Discard the reasoning content, exit "in think" mode
+        buffer = buffer.slice(closeIdx + '</think>'.length);
+        inThink = false;
+      }
+    }
+  };
+}
 async function streamFromModel(model, cleanMessages, res) {
+  const writeFiltered = createThinkFilter(res);
+
   if (model.provider === 'groq') {
     if (!groq) throw new Error('Groq not configured');
     const textOnly = cleanMessages.map(m => ({ role: m.role, content: toPlainText(m.content) }));
@@ -799,7 +842,7 @@ async function streamFromModel(model, cleanMessages, res) {
     });
     for await (const chunk of stream) {
       const content = chunk.choices[0]?.delta?.content || '';
-      if (content) res.write(content);
+      if (content) writeFiltered(content);
     }
   } else if (model.provider === 'openrouter') {
     if (!process.env.OPENROUTER_API_KEY) throw new Error('OpenRouter not configured');
@@ -821,7 +864,7 @@ async function streamFromModel(model, cleanMessages, res) {
             try {
               const json = JSON.parse(line.slice(6));
               const content = json.choices[0]?.delta?.content || '';
-              if (content) res.write(content);
+              if (content) writeFiltered(content);
             } catch {}
           }
         }
