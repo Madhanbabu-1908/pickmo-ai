@@ -325,33 +325,16 @@ function resolveDDGUrl(rawHref) {
 
 async function searchDuckDuckGo(query, maxResults = 5) {
   try {
-    const url = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-    const response = await axios.get(url, {
-      timeout: 8000,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml',
-        'Accept-Language': 'en-US,en;q=0.5'
-      }
+    const response = await axios.post('https://api.tavily.com/search', {
+      api_key: process.env.TAVILY_API_KEY,
+      query,
+      max_results: maxResults
     });
-    const $ = cheerio.load(response.data);
-    const results = [];
-    $('.result').each((_, el) => {
-      if (results.length >= maxResults) return false;
-      const titleEl = $(el).find('.result__a');
-      const snippetEl = $(el).find('.result__snippet');
-      const title = titleEl.text().trim();
-      const rawHref = titleEl.attr('href') || '';
-      const snippet = snippetEl.text().trim();
-      const resolvedUrl = resolveDDGUrl(rawHref);
-      if (title && resolvedUrl && resolvedUrl.startsWith('http')) {
-        results.push({ title, url: resolvedUrl, snippet });
-      }
-    });
-    console.log(`🔍 DDG found ${results.length} results for: "${query}"`);
-    return results;
+    return response.data.results.map(r => ({
+      title: r.title, url: r.url, snippet: r.content
+    }));
   } catch (err) {
-    console.error('DuckDuckGo search error:', err.message);
+    console.error('Tavily search error:', err.message);
     return [];
   }
 }
