@@ -840,10 +840,16 @@ app.post('/api/chat/stream', async (req, res) => {
   // PII check
   for (const msg of cleanMessages) {
     const text = typeof msg.content === 'string' ? msg.content : (msg.content.find?.(p => p.type === 'text')?.text || '');
-    if (containsPII(text)) {
-      res.write('⚠️ Your message contains personal information. For privacy, we cannot process this request.');
-      res.end(); return;
-    }
+    // PII check — only on the NEW user message, not full history
+const latestUserMsg = cleanMessages[cleanMessages.length - 1];
+const latestText = typeof latestUserMsg.content === 'string'
+  ? latestUserMsg.content
+  : (latestUserMsg.content.find?.(p => p.type === 'text')?.text || '');
+
+if (containsPII(latestText)) {
+  res.write('⚠️ Your message contains personal information. For privacy, we cannot process this request.');
+  res.end(); return;
+}
   }
 
   let searchImages = [];
