@@ -63,6 +63,40 @@ async function getEmbedding(text) {
 const documentsByChat = new Map();
 const BACKUP_FILE = path.join(__dirname, 'documents_backup.json');
 
+const chatSummaryCache = new Map(); // chatId -> { summary: string, summarizedUpToIndex: number }
+
+const MAX_RAW_MESSAGES = 6;
+
+async function getCompressedMessages(chatId, fullMessages) {
+  if (!chatId || fullMessages.length <= MAX_RAW_MESSAGES) return fullMessages;
+
+  const cached = chatSummaryCache.get(chatId) || { summary: '', summarizedUpToIndex: 0 };
+  const recent = fullMessages.slice(-MAX_RAW_MESSAGES);
+  const olderUnsummarized = fullMessages.slice(cached.summarizedUpToIndex, fullMessages.length - MAX_RAW_MESSAGES);
+
+  if (olderUnsummarized.length > 0) {
+    const toSummarize = olderUnsummarized.map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : ''}`).join('\n');
+    const summaryResp = await groq.chat.completions.create({
+      model: 'llama-3.1-8b-instant',
+      messages: [
+        { role: 'system', content: 'Summarize this conversation excerpt in 3-4 sentences, keeping key facts only.' },
+        { role: 'user', content: toSummarize }
+      ],
+      max_tokens: 150
+    });
+    const newSummaryPiece = summaryResp.choices[0]?.message?.content || '';
+    cached.summary = (cached.summary + '\n' + newSummaryPiece).trim();
+    cached.summarizedUpToIndex = fullMessages.length - MAX_RAW_MESSAGES;
+    chatSummaryCache.set(chatId, cached);
+  }
+
+  const summaryMsg = cached.summary
+    ? [{ role: 'system', content: `Earlier conversation summary:\n${cached.summary}` }]
+    : [];
+
+  return [...summaryMsg, ...recent];
+}
+
 function saveDocumentsToDisk() {
   if (process.env.SAVE_DOCUMENTS !== 'true') return;
   const data = {};
@@ -816,6 +850,7 @@ app.post('/api/chat/stream', async (req, res) => {
   let cleanMessages = messages
     .filter(m => m && (typeof m.content === 'string' || Array.isArray(m.content)) && m.content.length > 0)
     .map(m => ({ role: m.role, content: m.content }));
+cleanMessages = await getCompressedMessages(req.body.chatId, cleanMessages);
 
   if (!cleanMessages.length) { res.write('Please start a new conversation.'); res.end(); return; }
   if (cleanMessages[cleanMessages.length - 1].role !== 'user') { res.write("I'm waiting for your message."); res.end(); return; }
