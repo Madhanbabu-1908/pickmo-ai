@@ -876,19 +876,21 @@ app.post('/api/chat/stream', async (req, res) => {
   // For web search agent, fetch real data first
   let finalSystemPrompt = systemPrompt;
   if (intent === 'web_search') {
-    try {
-      const { pages, allImages } = await fullWebSearch(userText);
-      searchImages = allImages.slice(0, 6);
-      if (pages.length > 0) {
-        finalSystemPrompt = buildWebSearchPrompt(pages, searchImages, userText);
-      } else {
-        finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt();
-      }
-    } catch (err) {
-      console.error('Web search pipeline error:', err.message);
-      finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt();
+  try {
+    const { pages, allImages } = await fullWebSearch(userText);
+    searchImages = allImages.slice(0, 6);
+    if (pages.length > 0) {
+      finalSystemPrompt = buildWebSearchPrompt(pages, searchImages, userText);
+    } else {
+      finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt() +
+        '\n\nNOTE: Web search was attempted but returned no results (search provider may be rate-limiting). Tell the user web search is temporarily unavailable and answer from your own knowledge instead.';
     }
+  } catch (err) {
+    console.error('Web search pipeline error:', err.message);
+    finalSystemPrompt = orchestrator.agents.general.buildSystemPrompt() +
+      '\n\nNOTE: Web search failed due to an error. Tell the user web search is temporarily unavailable.';
   }
+}
 
   // Inject agent system prompt (remove any existing system messages first)
   cleanMessages = cleanMessages.filter(m => m.role !== 'system');
