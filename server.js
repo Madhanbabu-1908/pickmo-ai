@@ -83,16 +83,13 @@ function loadDocumentsFromDisk() {
 // ========== PII Guardrail ==========
 function containsPII(text) {
   const patterns = [
-    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/,
-    /\b(\+?91|0)?[6-9]\d{9}\b/,
-    /\b(\+\d{1,3}[- ]?)?\(?\d{2,4}\)?[- ]?\d{3,4}[- ]?\d{4}\b/,
-    /\b(?:\d[ -]*?){13,16}\b/,
-    /\b\d{4}[ -]?\d{4}[ -]?\d{4}\b/,
-    /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/
+    /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/,          // email
+    /\b(?:\+91[-\s]?)?[6-9]\d{9}\b/,                                  // Indian mobile only
+    /\b\d{4}[ -]\d{4}[ -]\d{4}[ -]\d{4}\b/,                           // 16-digit card w/ separators
+    /\b[A-Z]{5}[0-9]{4}[A-Z]{1}\b/                                   // PAN
   ];
   return patterns.some(p => p.test(text));
 }
-
 // ========== Multimodal helpers ==========
 function toPlainText(content) {
   if (typeof content === 'string') return content;
